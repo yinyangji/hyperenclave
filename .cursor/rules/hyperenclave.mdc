@@ -1,0 +1,35 @@
+---
+description: HyperEnclave no_std hypervisor 开发规范（构建命令、no_std 约束、Intel/AMD 同步、安全代码规则）
+globs:
+alwaysApply: true
+---
+
+# HyperEnclave 开发规范
+
+开始任务前先阅读仓库根目录的 `AGENTS.md`（唯一真实源）与 `SKILL.md`（操作流程）。核心规则：
+
+## 项目性质
+
+- Rust 编写的 `no_std` 裸机 hypervisor（HyperEnclave TEE 的 RustMonitor），运行于 VMX root / SVM host mode。
+- 安全关键代码（TCB）：页表模块经形式化验证，改动可能破坏安全不变量。
+- panic 不可恢复：不要新增 `unwrap()`/`expect()`/`panic!()`；错误用 `hv_result_err!(errno)` 返回 `HvResult`。
+
+## 构建与验证
+
+```bash
+make format                                  # rustfmt（pre-commit 强制）
+make clippy VENDOR=intel SME=off             # Intel 配置检查
+make clippy VENDOR=amd  SME=on               # AMD 配置检查（SME=on 仅 VENDOR=amd 合法）
+make test                                    # 单元测试
+make build VENDOR=intel|amd [LOG=warn]       # 构建
+```
+
+## 硬性规则
+
+1. 只用 `core`/`alloc`，禁止引入 `std` 依赖（新 crate 需 `default-features = false`）。
+2. 每个 `.rs` 文件带 Apache-2.0 license 头（照抄现有文件）。
+3. 新增 `unsafe` 须带 `// SAFETY:` 注释。
+4. Intel（`src/arch/x86_64/intel/`）与 AMD（`src/arch/x86_64/amd/`）两套实现必须同步修改；公共逻辑放 `src/` 顶层或 `src/arch/x86_64/vmm.rs`。
+5. 不要改动：`rust-toolchain`、`x86_64.json`、`linker.lds`、`lib/libtpm.a`、`VERSION`。
+6. 注释用英文；不要提交 `target/`。
+7. 处理 guest 传入的指针/地址时必须先经页表查询与 normal world 区间校验，绝不直接解引用。
