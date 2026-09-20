@@ -20,8 +20,8 @@
 ## 常用命令
 
 ```bash
-make build VENDOR=intel SME=off    # Intel 构建
-make build VENDOR=amd  SME=on      # AMD 构建（SME=on 仅 VENDOR=amd 合法）
+make elf VENDOR=intel SME=off    # Intel 构建（无 build 目标，目标名为 elf）
+make elf VENDOR=amd  SME=on      # AMD 构建（SME=on 仅 VENDOR=amd 合法）
 make format / make format-check    # 格式化 / 检查
 make clippy                        # 静态检查
 make test                          # 单元测试

@@ -22,8 +22,9 @@ HyperEnclave 是一个开源、跨平台的可信执行环境（TEE），核心�
 
 ```bash
 # 构建（默认 VENDOR=amd SME=on INTR=on；SME=on 仅在 VENDOR=amd 时合法）
-make build VENDOR=intel SME=off LOG=warn
-make build VENDOR=amd  SME=on
+# 注意：Makefile 没有 build 目标，构建目标是 elf（或直接 make，其包含 githooks+elf）
+make elf VENDOR=intel SME=off LOG=warn
+make elf VENDOR=amd  SME=on
 
 # 一键构建并安装到 /lib/firmware（需 sudo，自动探测 SME）
 bash -x scripts/build_and_install_hyperenclave.sh [Intel|AMD|Hygon]
@@ -37,6 +38,8 @@ make format         # 自动格式化
 make disasm         # 查看上次构建的反汇编
 make install        # sudo cp ELF 到 /lib/firmware/rust-hypervisor-<VENDOR>
 ```
+
+> 环境准备：需要 `rustup component add rust-src --toolchain nightly-2025-11-05`（构建用 `-Z build-std`），首次构建 rustup 会自动下载工具链。
 
 Makefile 参数：
 

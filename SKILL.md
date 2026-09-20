@@ -19,10 +19,9 @@ make clippy VENDOR=amd  SME=on
 
 # 3. 单元测试
 make test
-
-# 4. 构建产物验证
-make build VENDOR=intel SME=off LOG=warn
-make build VENDOR=amd  SME=on  LOG=warn
+# 4. 构建产物验证（注意：Makefile 没有 build 目标，构建目标是 elf）
+make elf VENDOR=intel SME=off LOG=warn
+make elf VENDOR=amd  SME=on  LOG=warn
 ```
 
 **验收标准**：四步全部零 error。clippy 新增 warning 视为不通过。

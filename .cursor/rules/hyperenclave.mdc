@@ -21,7 +21,7 @@ make format                                  # rustfmt（pre-commit 强制）
 make clippy VENDOR=intel SME=off             # Intel 配置检查
 make clippy VENDOR=amd  SME=on               # AMD 配置检查（SME=on 仅 VENDOR=amd 合法）
 make test                                    # 单元测试
-make build VENDOR=intel|amd [LOG=warn]       # 构建
+make elf VENDOR=intel|amd [LOG=warn]         # 构建（无 build 目标，目标名为 elf）
 ```
 
 ## 硬性规则
