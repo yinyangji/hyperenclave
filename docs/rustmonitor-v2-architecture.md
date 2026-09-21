@@ -131,6 +131,27 @@ flowchart LR
 
 </details>
 
+### 1.4 威胁模型（v2 决策依据）
+
+v2 的 fail-closed 默认、拦截面选择与验证范围均以下述威胁模型为准绳（与 HyperEnclave 论文及 HyperGPU 分享材料一致，见 [rustmonitor-architecture.md §6.5](rustmonitor-architecture.md)）：
+
+| 类别 | 内容 | v2 设计对应 |
+|---|---|---|
+| **可抵御**：高特权软件攻击 | ①系统管理员越权（L1 内核态读写 CVM/Enclave 寄存器与安全内存）；②攻击者与恶意 CVM 合谋；③恶意设备发起 DMA | ①GPM 空映射 + MSR/CPUID 仿真（§4.2/§4.3）；②域间隔离由 IOMMU/设备页表仲裁；③IOMMU DMA 页表仅映射授权区 |
+| **不考虑**：硬件攻击 | 冷启动内存攻击（可用内存加密抵御）、PCIe 链路窃听（可用端到端加密抵御） | 内存加密走现有 SME 路径；链路加密属应用层（HyperGPU 三层加密体系） |
+| **不考虑**：侧信道攻击 | 时序/缓存侧信道不在防护范围 | 但 v2 仍主动封禁调试/追踪类 MSR（LBR/PT/PEBS 拒绝，§4.2.2）——属低成本纵深防御 |
+| **不考虑**：DoS 攻击 | 可用性不承诺 | hypervisor 自身 fault 路径降级注入（v1 已有） |
+
+### 1.5 Partition 模型的已落地用例：HyperGPU 的 L2 CVM 形态
+
+§4.1 将多分区列为“远期扩展点”——需修正：**嵌套虚拟化的 CVM 形态已在 HyperGPU（HyperEnclave 的 GPU TEE 扩展）中落地**，其部署形态为：
+
+- **L0** = HyperEnclave（本 monitor，支持 eVMCS 嵌套虚拟化加速，~13k LoC）；
+- **L1** = 降级后的 Host Linux（不可信），内含 KVM + HyperEnclave Driver + cloud-hypervisor；
+- **L2** = CVM（跑 TEE OS/App，可信负载）与 Enclave VM，GPU-TEE 场景下运行密态大模型。
+
+这证明两件事：①降级后的 L1 仍可运行 KVM 创建 L2 虚拟机，L0 需提供 eVMCS 支持其高效运行；②v2 的 Partition 模型（§4.1）与 GPM 域内变异正是对该形态的类型系统支撑——v2 不实现多分区，但不堵死 HyperGPU 已验证的落地路径。由此 v2 差距清单补充一条：**嵌套虚拟化支持（eVMCS）为 HyperGPU 形态的硬依赖**，见实现设计文档 §0.2 G15。
+
 ---
 
 ## 2. 现状基线：资产与债务
@@ -290,7 +311,7 @@ pub enum ProtectedDomain {
 }
 ```
 
-改造路径：`cell.rs` 的 Root Cell 泛化为 `Partition`（v2 仍只有 1 个 root partition，但类型系统就位）；enclave 从"异常驱动的运行模式"升格为显式建模的 ProtectedDomain。**多分区是远期扩展点，v2 不实现但不再被类型系统堵死。**
+改造路径：`cell.rs` 的 Root Cell 泛化为 `Partition`（v2 仍只有 1 个 root partition，但类型系统就位）；enclave 从"异常驱动的运行模式"升格为显式建模的 ProtectedDomain。**多分区在 v2 代码中不实现但不再被类型系统堵死——且该形态已被 HyperGPU 的 L2 CVM 部署验证可行（见 §1.5）：L1 降级 Linux 中的 KVM 创建 L2 CVM，L0 提供 eVMCS 支持。**
 
 ### 4.2 MSR 虚拟化子系统（v2 最大单项）
 

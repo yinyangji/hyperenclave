@@ -32,9 +32,10 @@
 | G11 | CR0/CR4 保留位 | Intel set_cr 已有 FIXED0/1 逻辑（[intel/vcpu.rs:441-476](../src/arch/x86_64/intel/vcpu.rs#L441-L476)）；AMD 仅清 NW（[amd/vcpu.rs:317-324](../src/arch/x86_64/amd/vcpu.rs#L317-L324)）；`Vcpu::new` 的 TODO 检查未做 | P2 | §9.2 |
 | G12 | 测试 | 3 个单元测试 | P1 | §11 |
 | G13 | VT-d cache line 硬编码 64B（[intel/vtd.rs:415](../src/arch/x86_64/intel/vtd.rs#L415)） | P2 | 读 CAP 寄存器 | |
-| G14 | libtpm.a 闭源 | 二进制依赖，无法重建 | — | 架构范围外，fake TPM 兜底 |
+| G14 | libtpm.a 闭源 | 二进制依赖，无法重建 | — | 架构范围外，fake TPM 兑底 |
+| G15 | 嵌套虚拟化支持（eVMCS） | HyperGPU 形态的硬依赖：L1 降级 Linux 需跑 KVM 创建 L2 CVM，L0 需提供 enlightened VMCS 加速；当前代码库未见 eVMCS 实现（VMCS 操作为直接 vmptrld/vmwrite） | **P1** | 见架构文档 §1.5；需评估对 libvmm vmcs 层的扩展（VMCS shadowing + eVMCS 区域） |
 
-**不在 v2 范围**（v2 架构文档 §6 已定）：SMM 模拟、S3 真睡眠（明确拒绝）、多分区/多 VM、libtpm 重写。
+**不在 v2 范围**（v2 架构文档 §6 已定）：SMM 模拟、S3 真睡眠（明确拒绝）、多分区/多 VM、libtpm 重写。注：G15 的嵌套虚拟化仅在其依赖 HyperGPU CVM 形态部署时需要，与“多分区不实现”不矛盾——L1 KVM 自身可在现有双页表体系上运行，eVMCS 是性能优化项兼 HyperGPU 前置项。
 
 ---
 
