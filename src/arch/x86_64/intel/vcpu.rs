@@ -74,14 +74,36 @@ impl Vcpu {
         }
 
         // Check control registers.
-        let _cr0 = linux.cr0;
+        //
+        // Reserved bits must be zero (G11) and the monitor only supports
+        // paging in long mode: fail fast instead of running into undefined
+        // behavior later.
+        let cr0 = linux.cr0;
         let cr4 = linux.cr4;
-        // TODO: check reserved bits
+        if cr0.bits() & super::super::CR0_RESERVED != 0
+            || cr4.bits() & super::super::CR4_RESERVED != 0
+        {
+            return hv_result_err!(
+                EINVAL,
+                format!(
+                    "Reserved bits set in CR0/CR4: cr0={:#x}, cr4={:#x}",
+                    cr0.bits(),
+                    cr4.bits()
+                )
+            );
+        }
+        if !cr0.contains(Cr0Flags::PAGING | Cr0Flags::PROTECTED_MODE_ENABLE)
+            || !cr4.contains(Cr4Flags::PHYSICAL_ADDRESS_EXTENSION)
+        {
+            return hv_result_err!(EINVAL, "Hypervisor requires paging in long mode");
+        }
         if cr4.contains(Cr4Flags::VIRTUAL_MACHINE_EXTENSIONS) {
             return hv_result_err!(EBUSY, "VMX is already turned on!");
         }
+        // L5 paging (LA57) is not supported by the EPT implementation: refuse
+        // to activate instead of crashing on a later EPT walk (G4 fail-fast).
         if cr4.contains(Cr4Flags::L5_PAGING) {
-            error!("L5_PAGING isn't supported by hypervisor!");
+            return hv_result_err!(ENODEV, "L5_PAGING isn't supported by hypervisor!");
         }
 
         // Enable VMXON, if required.

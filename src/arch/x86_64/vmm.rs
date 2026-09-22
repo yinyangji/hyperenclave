@@ -20,7 +20,7 @@ mod vendor;
 #[path = "amd/mod.rs"]
 mod vendor;
 
-use x86_64::registers::control::Cr4Flags;
+use x86_64::registers::control::{Cr0Flags, Cr4Flags};
 
 use super::GuestRegisters;
 use crate::{error::HvResult, percpu::PerCpu};
@@ -70,6 +70,18 @@ const VM_EXIT_LEN_HYPERCALL: u8 = 3;
 const HOST_CR4: Cr4Flags = Cr4Flags::from_bits_truncate(
     Cr4Flags::PHYSICAL_ADDRESS_EXTENSION.bits() | Cr4Flags::OSXSAVE.bits(),
 );
+
+/// Architecturally reserved CR0 bits (must be zero on both vendors).
+///
+/// `Cr0Flags` covers every architecturally defined CR0 bit, so everything
+/// outside it is reserved (Intel SDM Vol.3 §2.5, AMD APM Vol.2).
+const CR0_RESERVED: u64 = !Cr0Flags::all().bits();
+/// Architecturally reserved CR4 bits (must be zero on both vendors).
+///
+/// `Cr4Flags` covers every architecturally defined CR4 bit (bits 0-14 and
+/// 16-24; bits 15 and 25-63 are reserved), so everything outside it is
+/// reserved (Intel SDM Vol.3 §2.5, AMD APM Vol.2).
+const CR4_RESERVED: u64 = !Cr4Flags::all().bits();
 
 pub(super) struct VmExit<'a> {
     pub cpu_data: &'a mut PerCpu,

@@ -50,7 +50,7 @@ impl HyperCall<'_> {
         let secs = *GuestPtr::gpaddr_to_ref(&secs_gpaddr, false)?;
         info!("enclave_create({:#x?}): {:#x?}", config_ptr, secs);
         let enclave = Enclave::new(secs_gpaddr, config_ptr.guest_vaddr(), secs)?;
-        ENCLAVE_MANAGER.add_enclave(enclave.clone())?;
+        ENCLAVE_MANAGER.get().add_enclave(enclave.clone())?;
         enclave.atomic_add_stats(EnclaveStatsId::Create, now.elapsed());
         Ok(0)
     }
@@ -65,7 +65,7 @@ impl HyperCall<'_> {
         let config_ptr = page_desc
             .config_address
             .as_guest_ptr_ns::<HvEnclDesc>(&self.gpt, self.privilege_level());
-        let enclave = ENCLAVE_MANAGER.find_enclave(config_ptr.as_guest_paddr()?)?;
+        let enclave = ENCLAVE_MANAGER.get().find_enclave(config_ptr.as_guest_paddr()?)?;
         enclave.add_page(&page_desc, &self.gpt)?;
         enclave.atomic_add_stats(EnclaveStatsId::AddPage, now.elapsed());
 
@@ -82,7 +82,7 @@ impl HyperCall<'_> {
         let config_ptr = init_desc
             .config_address
             .as_guest_ptr_ns::<HvEnclDesc>(&self.gpt, self.privilege_level());
-        let enclave = ENCLAVE_MANAGER.find_enclave(config_ptr.as_guest_paddr()?)?;
+        let enclave = ENCLAVE_MANAGER.get().find_enclave(config_ptr.as_guest_paddr()?)?;
         let sigstruct_ptr = init_desc
             .sigstruct
             .as_guest_ptr_ns::<SigStruct>(&self.gpt, self.privilege_level());
@@ -96,7 +96,7 @@ impl HyperCall<'_> {
         config_ptr: GuestPtr<HvEnclDesc>,
     ) -> HyperCallResult<usize> {
         let now = Instant::now();
-        let enclave = ENCLAVE_MANAGER.find_enclave(config_ptr.as_guest_paddr()?)?;
+        let enclave = ENCLAVE_MANAGER.get().find_enclave(config_ptr.as_guest_paddr()?)?;
         debug!(
             "enclave_prepare_destroy, config_ptr: {:#x?}), encalve: {:?}",
             config_ptr, enclave
@@ -112,7 +112,7 @@ impl HyperCall<'_> {
     ) -> HyperCallResult<usize> {
         let config = config_ptr.read()?;
         info!("enclave_finish_destroy({:#x?}): {:#x?}", config_ptr, config);
-        ENCLAVE_MANAGER.remove_enclave(config_ptr.as_guest_paddr()?)?;
+        ENCLAVE_MANAGER.get().remove_enclave(config_ptr.as_guest_paddr()?)?;
         Ok(0)
     }
 
@@ -433,7 +433,7 @@ impl HyperCall<'_> {
             "enclave_add_version_array, config_ptr: {:#x?}, va_paddr: {:#x?}",
             config_ptr, va_paddr
         );
-        let enclave = ENCLAVE_MANAGER.find_enclave(config_ptr.as_guest_paddr()?)?;
+        let enclave = ENCLAVE_MANAGER.get().find_enclave(config_ptr.as_guest_paddr()?)?;
 
         enclave.add_version_array(va_paddr as GuestPhysAddr)?;
         enclave.atomic_add_stats(EnclaveStatsId::AddVersionArray, now.elapsed());
@@ -451,7 +451,7 @@ impl HyperCall<'_> {
         let config_ptr = page_desc
             .config_address
             .as_guest_ptr_ns::<HvEnclDesc>(&self.gpt, self.privilege_level());
-        let enclave = ENCLAVE_MANAGER.find_enclave(config_ptr.as_guest_paddr()?)?;
+        let enclave = ENCLAVE_MANAGER.get().find_enclave(config_ptr.as_guest_paddr()?)?;
 
         enclave.block(&page_desc)?;
         enclave.atomic_add_stats(EnclaveStatsId::Block, now.elapsed());
@@ -463,7 +463,7 @@ impl HyperCall<'_> {
         let now = Instant::now();
         let config = config_ptr.read()?;
         debug!("enclave_track({:#x?}): {:#x?}", config_ptr, config);
-        let enclave = ENCLAVE_MANAGER.find_enclave(config_ptr.as_guest_paddr()?)?;
+        let enclave = ENCLAVE_MANAGER.get().find_enclave(config_ptr.as_guest_paddr()?)?;
         enclave.track()?;
         enclave.atomic_add_stats(EnclaveStatsId::Track, now.elapsed());
 
@@ -486,7 +486,7 @@ impl HyperCall<'_> {
             .as_guest_ptr_ns::<HvEnclDesc>(&self.gpt, self.privilege_level());
         let time_get_config_ptr = now.elapsed();
 
-        let enclave = ENCLAVE_MANAGER.find_enclave(config_ptr.as_guest_paddr()?)?;
+        let enclave = ENCLAVE_MANAGER.get().find_enclave(config_ptr.as_guest_paddr()?)?;
         let time_find_enclave = now.elapsed();
 
         enclave.write_back_page_wrapper(&page_desc, &self.gpt, va_slot_pa as usize)?;
@@ -516,7 +516,7 @@ impl HyperCall<'_> {
             .as_guest_ptr_ns::<HvEnclDesc>(&self.gpt, self.privilege_level());
         let time_get_config_ptr = now.elapsed();
 
-        let enclave = ENCLAVE_MANAGER.find_enclave(config_ptr.as_guest_paddr()?)?;
+        let enclave = ENCLAVE_MANAGER.get().find_enclave(config_ptr.as_guest_paddr()?)?;
         let time_find_enclave = now.elapsed();
         enclave.load_unblocked(&page_desc, &self.gpt, va_slot_pa as usize)?;
         enclave.atomic_add_stats(EnclaveStatsId::LoadUnblocked, now.elapsed());
@@ -563,7 +563,7 @@ impl HyperCall<'_> {
         let config_ptr = remove_desc
             .config_address
             .as_guest_ptr_ns::<HvEnclDesc>(&self.gpt, self.privilege_level());
-        let enclave = ENCLAVE_MANAGER.find_enclave(config_ptr.as_guest_paddr()?)?;
+        let enclave = ENCLAVE_MANAGER.get().find_enclave(config_ptr.as_guest_paddr()?)?;
 
         let page_array_ptr = remove_desc
             .page_array_addr
@@ -593,7 +593,7 @@ impl HyperCall<'_> {
     ) -> HyperCallResult<usize> {
         let config = config_ptr.read()?;
         debug!("enclave_reset_stats({:#x?}): {:#x?}", config_ptr, config);
-        let enclave = ENCLAVE_MANAGER.find_enclave(config_ptr.as_guest_paddr()?)?;
+        let enclave = ENCLAVE_MANAGER.get().find_enclave(config_ptr.as_guest_paddr()?)?;
         enclave.reset_stats();
         Ok(0)
     }
@@ -607,7 +607,7 @@ impl HyperCall<'_> {
         let config_ptr = page_desc
             .config_address
             .as_guest_ptr_ns::<HvEnclDesc>(&self.gpt, self.privilege_level());
-        let enclave = ENCLAVE_MANAGER.find_enclave(config_ptr.as_guest_paddr()?)?;
+        let enclave = ENCLAVE_MANAGER.get().find_enclave(config_ptr.as_guest_paddr()?)?;
         enclave.augment_page(
             page_desc.enclave_lin_addr as usize,
             page_desc.enclave_phys_addr as usize,
@@ -627,7 +627,7 @@ impl HyperCall<'_> {
         let config_ptr = page_desc
             .config_address
             .as_guest_ptr_ns::<HvEnclDesc>(&self.gpt, self.privilege_level());
-        let enclave = ENCLAVE_MANAGER.find_enclave(config_ptr.as_guest_paddr()?)?;
+        let enclave = ENCLAVE_MANAGER.get().find_enclave(config_ptr.as_guest_paddr()?)?;
         enclave.modify_page_type(
             page_desc.enclave_lin_addr as usize,
             page_desc.sec_info as usize,
@@ -646,7 +646,7 @@ impl HyperCall<'_> {
         let config_ptr = page_desc
             .config_address
             .as_guest_ptr_ns::<HvEnclDesc>(&self.gpt, self.privilege_level());
-        let enclave = ENCLAVE_MANAGER.find_enclave(config_ptr.as_guest_paddr()?)?;
+        let enclave = ENCLAVE_MANAGER.get().find_enclave(config_ptr.as_guest_paddr()?)?;
         enclave.restrict_page_perm(
             page_desc.enclave_lin_addr as usize,
             page_desc.sec_info as usize,
@@ -666,7 +666,7 @@ impl HyperCall<'_> {
         let config_ptr = page_desc
             .config_address
             .as_guest_ptr_ns::<HvEnclDesc>(&self.gpt, self.privilege_level());
-        let enclave = ENCLAVE_MANAGER.find_enclave(config_ptr.as_guest_paddr()?)?;
+        let enclave = ENCLAVE_MANAGER.get().find_enclave(config_ptr.as_guest_paddr()?)?;
         enclave.remove_page_at_runtime(page_desc.enclave_lin_addr as usize)?;
         enclave.atomic_add_stats(EnclaveStatsId::RemovePageAtRuntime, now.elapsed());
 
@@ -684,7 +684,7 @@ impl HyperCall<'_> {
             .as_guest_ptr_ns::<HvEnclDesc>(&self.gpt, self.privilege_level());
         let start_addr = mem_desc.start_addr as GuestVirtAddr;
         let end_addr = mem_desc.end_addr as GuestVirtAddr;
-        let enclave = ENCLAVE_MANAGER.find_enclave(config_ptr.as_guest_paddr()?)?;
+        let enclave = ENCLAVE_MANAGER.get().find_enclave(config_ptr.as_guest_paddr()?)?;
         enclave.add_shared_memory(&(start_addr..end_addr), &self.gpt)?;
         enclave.atomic_add_stats(EnclaveStatsId::AddSharedMemory, now.elapsed());
         Ok(0)
@@ -701,7 +701,7 @@ impl HyperCall<'_> {
             .as_guest_ptr_ns::<HvEnclDesc>(&self.gpt, self.privilege_level());
         let start_addr = mem_desc.start_addr as GuestVirtAddr;
         let end_addr = mem_desc.end_addr as GuestVirtAddr;
-        let enclave = ENCLAVE_MANAGER.find_enclave(config_ptr.as_guest_paddr()?)?;
+        let enclave = ENCLAVE_MANAGER.get().find_enclave(config_ptr.as_guest_paddr()?)?;
         enclave.remove_shared_memory(&(start_addr..end_addr))?;
         enclave.atomic_add_stats(EnclaveStatsId::RemoveSharedMemory, now.elapsed());
         Ok(0)
@@ -717,7 +717,7 @@ impl HyperCall<'_> {
             .as_guest_ptr_ns::<HvEnclDesc>(&self.gpt, self.privilege_level());
         let start_addr = mem_desc.start_addr as GuestVirtAddr;
         let end_addr = mem_desc.end_addr as GuestVirtAddr;
-        let enclave = ENCLAVE_MANAGER.find_enclave(config_ptr.as_guest_paddr()?)?;
+        let enclave = ENCLAVE_MANAGER.get().find_enclave(config_ptr.as_guest_paddr()?)?;
         let mem_ranges = enclave
             .shmem()
             .read()
@@ -730,7 +730,7 @@ impl HyperCall<'_> {
         &self,
         config_ptr: GuestPtr<HvEnclDesc>,
     ) -> HyperCallResult<usize> {
-        let enclave = ENCLAVE_MANAGER.find_enclave(config_ptr.as_guest_paddr()?)?;
+        let enclave = ENCLAVE_MANAGER.get().find_enclave(config_ptr.as_guest_paddr()?)?;
         enclave.sync_shared_memory(&SharedMemSyncType::InvalidEnd, &self.gpt)?;
         Ok(0)
     }

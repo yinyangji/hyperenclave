@@ -44,6 +44,7 @@ mod iommu;
 mod memory;
 mod percpu;
 mod stats;
+mod sync;
 
 #[cfg(not(test))]
 mod lang;
@@ -117,6 +118,13 @@ fn primary_init_early() -> HvResult {
 
     info!("Hypervisor header: {:#x?}", HvHeader::get());
     debug!("System config: {:#x?}", system_config);
+
+    // Initialize the global enclave manager before anything can touch it.
+    // SAFETY: this runs on the primary CPU only; secondary CPUs are spinning
+    // on the INIT_EARLY_OK barrier until primary_init_early() returns.
+    unsafe {
+        enclave::ENCLAVE_MANAGER.init(enclave::EnclaveManager::new())
+    };
 
     reclaim::init();
     memory::init()?;

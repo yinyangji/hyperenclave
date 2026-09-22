@@ -61,7 +61,33 @@ impl Vcpu {
             Msr::PERF_EVT_SEL5.write(Msr::PERF_EVT_SEL5.read() & !PERF_EVT_SEL_EN);
         }
 
-        // TODO: check linux CR0, CR4
+        // Check control registers.
+        //
+        // Reserved bits must be zero (G11) and the monitor only supports
+        // paging in long mode: fail fast instead of running into undefined
+        // behavior later.
+        let cr0 = linux.cr0;
+        let cr4 = linux.cr4;
+        if cr0.bits() & super::super::CR0_RESERVED != 0
+            || cr4.bits() & super::super::CR4_RESERVED != 0
+        {
+            return hv_result_err!(
+                EINVAL,
+                format!(
+                    "Reserved bits set in CR0/CR4: cr0={:#x}, cr4={:#x}",
+                    cr0.bits(),
+                    cr4.bits()
+                )
+            );
+        }
+        if !cr0.contains(Cr0Flags::PAGING | Cr0Flags::PROTECTED_MODE_ENABLE)
+            || !cr4.contains(Cr4Flags::PHYSICAL_ADDRESS_EXTENSION)
+        {
+            return hv_result_err!(EINVAL, "Hypervisor requires paging in long mode");
+        }
+        if cr4.contains(Cr4Flags::L5_PAGING) {
+            return hv_result_err!(ENODEV, "L5_PAGING isn't supported by hypervisor!");
+        }
 
         let efer = Efer::read();
         if efer.contains(EferFlags::SECURE_VIRTUAL_MACHINE_ENABLE) {
@@ -295,11 +321,11 @@ impl VcpuAccessGuestState for Vcpu {
     }
 
     fn fs_base(&self) -> u64 {
-        Msr::IA32_FS_BASE.read()
+        self.vmcb.save.fs.base
     }
 
     fn gs_base(&self) -> u64 {
-        Msr::IA32_GS_BASE.read()
+        self.vmcb.save.gs.base
     }
 
     fn efer(&self) -> u64 {
@@ -316,9 +342,14 @@ impl VcpuAccessGuestState for Vcpu {
 
     fn set_cr(&mut self, cr_idx: usize, val: u64) {
         match cr_idx {
-            0 => self.vmcb.save.cr0 = val & !Cr0Flags::NOT_WRITE_THROUGH.bits(),
+            // Mask off architecturally reserved bits and NW, as we don't want
+            // write-through caches while in root mode (G11).
+            0 => self.vmcb.save.cr0 = val
+                & !super::super::CR0_RESERVED
+                & !Cr0Flags::NOT_WRITE_THROUGH.bits(),
             3 => self.vmcb.save.cr3 = val,
-            4 => self.vmcb.save.cr4 = val,
+            // Mask off architecturally reserved bits (G11).
+            4 => self.vmcb.save.cr4 = val & !super::super::CR4_RESERVED,
             _ => unreachable!(),
         }
     }

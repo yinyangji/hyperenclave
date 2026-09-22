@@ -63,7 +63,7 @@ use structs::{
 use tlb_track::TLBFlushTrackingState;
 
 pub use crate::arch::EnclaveThreadState;
-pub use manager::ENCLAVE_MANAGER;
+pub use manager::{EnclaveManager, ENCLAVE_MANAGER};
 pub use thread::{EnclaveThread, VcpuAccessEnclaveState};
 
 #[repr(usize)]

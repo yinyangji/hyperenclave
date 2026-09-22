@@ -19,6 +19,7 @@ use spin::RwLock;
 use super::Enclave;
 
 use crate::error::HvResult;
+use crate::sync::LateInit;
 
 const MAX_ENCLAVE_NUM: usize = 32;
 
@@ -28,6 +29,12 @@ pub struct EnclaveManager {
 }
 
 impl EnclaveManager {
+    pub fn new() -> Self {
+        Self {
+            enclaves: core::array::from_fn(|_| RwLock::new(None)),
+        }
+    }
+
     fn position(
         arr: &[RwLock<Option<Arc<Enclave>>>],
         enclave_id: usize,
@@ -86,7 +93,9 @@ impl EnclaveManager {
     }
 }
 
-const BUFFER_LEN: usize = core::mem::size_of::<EnclaveManager>() / core::mem::size_of::<usize>();
-static mut EMPTY_BUFFER: [usize; BUFFER_LEN] = [0; BUFFER_LEN];
-
-pub static ENCLAVE_MANAGER: &EnclaveManager = unsafe { core::mem::transmute(&EMPTY_BUFFER) };
+/// The global enclave manager.
+///
+/// It is initialized once by the primary CPU in `primary_init_early()` before
+/// any other CPU can reach enclave code paths; use `ENCLAVE_MANAGER.get()` to
+/// access it. Replaces the old `static mut` + `transmute` zero-buffer hack.
+pub static ENCLAVE_MANAGER: LateInit<EnclaveManager> = LateInit::new();
