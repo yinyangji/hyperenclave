@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RustMonitor 硬件资源管理 · 大屏看板</title>
+<style>
+:root{
+  --bg:#0a0e1a; --slide:#0b1120; --card:#0f1728; --card2:#0d1424;
+  --ink:#eaf1ff; --sub:#93a1c0; --dim:#5d6b8a; --line:#1c2740;
+  --cyan:#22d3ee; --green:#22c55e; --amber:#f5b301; --red:#f4506a; --blue:#3d8bfd; --violet:#a78bfa;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{background:var(--bg)}
+body{font-family:"PingFang SC","Microsoft YaHei","Noto Sans CJK SC",-apple-system,"Segoe UI",sans-serif;color:var(--ink);-webkit-font-smoothing:antialiased}
+.slide{width:1600px;min-height:900px;margin:0 auto 48px;padding:52px 64px 40px;position:relative;
+  background:radial-gradient(1200px 500px at 18% -10%,#12203c 0%,rgba(18,32,60,0) 60%),linear-gradient(180deg,#0c1424 0%,#0a0f1c 100%);
+  border:1px solid #16203a;border-radius:6px;overflow:hidden}
+.s-head{margin-bottom:14px}
+.s-title{font-size:42px;font-weight:800;letter-spacing:1px}
+.s-title .hl{color:var(--cyan);margin-left:14px}
+.s-sub{margin-top:10px;font-size:16px;color:var(--sub);letter-spacing:.5px}
+.s-rule{height:1px;background:linear-gradient(90deg,#243456,rgba(36,52,86,0));margin:20px 0 22px}
+.concl{display:flex;gap:16px;align-items:stretch;border:1px solid rgba(34,211,238,.45);border-left:4px solid var(--cyan);
+  background:linear-gradient(90deg,rgba(34,211,238,.10),rgba(34,211,238,.03));border-radius:6px;padding:16px 22px;margin-bottom:26px}
+.concl .lab{writing-mode:vertical-rl;font-size:13px;letter-spacing:4px;color:var(--cyan);border-right:1px solid rgba(34,211,238,.35);padding-right:12px;display:flex;align-items:center}
+.concl .txt{font-size:18px;line-height:1.75;color:var(--ink)}
+.concl .txt b{color:var(--cyan);font-weight:700}
+.concl .txt .w{color:#fff;font-weight:700}
+.cards{display:grid;gap:22px}
+.cards.c3{grid-template-columns:repeat(3,1fr)}
+.cards.c4{grid-template-columns:repeat(4,1fr)}
+.card{background:linear-gradient(180deg,var(--card),var(--card2));border:1px solid #18233c;border-radius:10px;padding:22px 22px 20px;position:relative;display:flex;flex-direction:column}
+.card::before{content:"";position:absolute;left:0;right:0;top:0;height:3px;border-radius:10px 10px 0 0}
+.card.g::before{background:linear-gradient(90deg,var(--green),rgba(34,197,94,0))}
+.card.b::before{background:linear-gradient(90deg,var(--blue),rgba(61,139,253,0))}
+.card.r::before{background:linear-gradient(90deg,var(--red),rgba(244,80,106,0))}
+.card.v::before{background:linear-gradient(90deg,var(--violet),rgba(167,139,250,0))}
+.c-head{display:flex;align-items:center;gap:10px}
+.dot{width:16px;height:16px;border-radius:50%;flex:0 0 auto}
+.card.g .dot{background:var(--green)} .card.b .dot{background:var(--blue)} .card.r .dot{background:var(--red)} .card.v .dot{background:var(--violet)}
+.c-title{font-size:21px;font-weight:800;letter-spacing:.5px}
+.c-en{margin:8px 0 4px;font-size:11px;letter-spacing:2.5px;color:var(--dim);text-transform:uppercase}
+.chain{display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:8px;margin:16px 0 18px;min-height:34px}
+.chip{font-size:14px;font-weight:700;padding:5px 10px;border-radius:4px;white-space:nowrap}
+.chip.g{background:rgba(34,197,94,.16);color:#7ef0a0;border:1px solid rgba(34,197,94,.55)}
+.chip.b{background:rgba(61,139,253,.16);color:#8fc0ff;border:1px solid rgba(61,139,253,.55)}
+.chip.y{background:rgba(245,179,1,.14);color:#ffd766;border:1px solid rgba(245,179,1,.55)}
+.chip.r{background:rgba(244,80,106,.14);color:#ff92a5;border:1px solid rgba(244,80,106,.55)}
+.arr{font-size:13px;color:var(--sub);white-space:nowrap}
+.pts{list-style:none;margin-top:2px}
+.pts li{position:relative;padding-left:22px;font-size:15.5px;line-height:1.7;color:#d7e1f5;margin-bottom:11px}
+.pts li::before{content:"▶";position:absolute;left:0;top:2px;font-size:11px}
+.card.g .pts li::before{color:var(--green)} .card.b .pts li::before{color:var(--blue)} .card.r .pts li::before{color:var(--red)} .card.v .pts li::before{color:var(--violet)}
+.pts li b{color:#fff}
+.pts li .cy{color:var(--cyan);font-weight:700}
+.tags{margin-top:auto;padding-top:16px;display:flex;flex-wrap:wrap;gap:10px}
+.tag{font-size:13px;font-weight:700;padding:6px 14px;border-radius:999px;white-space:nowrap}
+.tag.g{background:rgba(34,197,94,.15);color:#7ef0a0;border:1px solid rgba(34,197,94,.5)}
+.tag.b{background:rgba(61,139,253,.15);color:#8fc0ff;border:1px solid rgba(61,139,253,.5)}
+.tag.y{background:rgba(245,179,1,.13);color:#ffd766;border:1px solid rgba(245,179,1,.5)}
+.tag.r{background:rgba(244,80,106,.13);color:#ff92a5;border:1px solid rgba(244,80,106,.5)}
+.s-foot{position:absolute;left:64px;right:64px;bottom:26px;display:flex;justify-content:space-between;align-items:center;
+  border-top:1px solid var(--line);padding-top:14px;font-size:13px;color:var(--dim)}
+.s-foot .no{letter-spacing:1px}
+</style>
+</head>
+<body>
+
+<!-- ============ 屏 1：整体架构与信任边界 ============ -->
+<section class="slide" id="s1">
+  <div class="s-head">
+    <div class="s-title">RustMonitor 硬件管理<span class="hl">三域隔离</span></div>
+    <div class="s-sub">host 降级为 L1 后，对硬件的访问会 VM-Exit 到 monitor 吗 —— 答案在"信任域"与"页表挖洞"</div>
+  </div>
+  <div class="s-rule"></div>
+  <div class="concl">
+    <div class="lab">核心结论</div>
+    <div class="txt">L1 绝大多数硬件访问（<span class="w">PIO / MMIO / 外部中断 / CR</span>）<b>直通、零 VM-Exit</b>；隔离不靠"每次拦截仲裁"，而靠 SLAT 把 monitor 内存与 EPC <b>映射成空页</b> —— <span class="w">"你根本映射不到"</span>，仅 CPUID / hypercall / NMI / Enclave 事件四类会 exit</div>
+  </div>
+  <div class="cards c3">
+    <div class="card b">
+      <div class="c-head"><span class="dot"></span><span class="c-title">Ⅰ 普通世界（L1）</span></div>
+      <div class="c-en">Normal World · Untrusted</div>
+      <div class="chain"><span class="chip b">Linux 内核 / App</span><span class="arr">→ 直通 →</span><span class="chip g">真实硬件</span></div>
+      <ul class="pts">
+        <li>PIO / MMIO / 绝大多数 MSR / 外部中断<b>全直通</b>，无 VM-Exit</li>
+        <li>CR3 切换零 exit（CR3 exiting 显式禁用），进程切换不受影响</li>
+        <li>CPUID 被<b>仿真伪装</b>：隐藏 VMX/SVM 位、宣告 hypervisor 存在</li>
+        <li>异常 / #PF 直达 L1 自己 IDT，Linux 缺页处理完全无感</li>
+      </ul>
+      <div class="tags"><span class="tag g">零 VM-Exit</span><span class="tag r">非信任</span></div>
+    </div>
+    <div class="card g">
+      <div class="c-head"><span class="dot"></span><span class="c-title">Ⅱ Monitor（TCB）</span></div>
+      <div class="c-en">RustMonitor · VMX Root</div>
+      <div class="chain"><span class="chip b">VMCALL</span><span class="arr">→ VM-Exit →</span><span class="chip g">hypercall 分发</span></div>
+      <ul class="pts">
+        <li>仅 <span class="cy">CPUID / hypercall / NMI / Enclave 事件</span> 四类 exit，拦截面极窄</li>
+        <li><b>三套页表</b>：GPM(EPT/NPT) · HVM(自身) · DMA(IOMMU)</li>
+        <li>EPCM / EDMM 管理 Enclave 生命周期与 EPC 页回收</li>
+        <li>monitor 内存 + EPC 在 GPM 与 DMA 中<b>映射空页 / 不映射</b></li>
+      </ul>
+      <div class="tags"><span class="tag g">窄拦截面</span><span class="tag b">RoT = TPM</span></div>
+    </div>
+    <div class="card v">
+      <div class="c-head"><span class="dot"></span><span class="c-title">Ⅲ Enclave（S-world）</span></div>
+      <div class="c-en">GU-Enclave · Ring3</div>
+      <div class="chain"><span class="chip b">EENTER</span><span class="arr">→ 切页表 →</span><span class="chip g">独立 NPT + GPT</span></div>
+      <ul class="pts">
+        <li><b>EFER.SCE 关闭</b>：Enclave 内禁止 syscall</li>
+        <li>全异常拦截（bitmap 全 1）→ 任何事件 <span class="cy">AEX</span> 弹回普通世界</li>
+        <li>内存对 L1 与 DMA 设备<b>结构性不可见</b>（机密性主防线）</li>
+        <li>与普通世界共享同一 vCPU，切换仅页表指针级开销</li>
+      </ul>
+      <div class="tags"><span class="tag g">机密性</span><span class="tag b">AEX 兜底</span></div>
+    </div>
+  </div>
+  <div class="s-foot"><span>一句话：隔离强度来自"映射不到"，而非"每次访问都仲裁"</span><span class="no">图 1 · 整体架构</span></div>
+</section>
+
+<!-- ============ 屏 2：Hypercall 调用流程 ============ -->
+<section class="slide" id="s2">
+  <div class="s-head">
+    <div class="s-title">Hypercall 调用链<span class="hl">七步往返</span></div>
+    <div class="s-sub">L1 与 monitor 的唯一上行控制通道 —— 从 VMCALL 陷入到读回返回值</div>
+  </div>
+  <div class="s-rule"></div>
+  <div class="concl">
+    <div class="lab">核心结论</div>
+    <div class="txt"><span class="w">编码即特权级</span>（code bit31：0=Supervisor 驱动级 / 1=User enclave 级）+ <span class="w">状态双重校验</span>（CpuState）+ <span class="w">指针必经 L1 页表翻译</span> —— monitor 从不直接信任 L1 传来的地址；enclave 无法调用创建/销毁自己的 Supervisor 级 hypercall</div>
+  </div>
+  <div class="cards c3">
+    <div class="card b">
+      <div class="c-head"><span class="dot"></span><span class="c-title">Ⅰ 发起 · 陷入</span></div>
+      <div class="c-en">Trap In</div>
+      <div class="chain"><span class="chip b">App / 驱动 VMCALL</span><span class="arr">→ VM-Exit →</span><span class="chip g">arch_entry</span></div>
+      <ul class="pts">
+        <li>寄存器约定：<span class="cy">RAX=code</span>、RDI/RSI=参数</li>
+        <li>Intel <b>VMCALL</b> / AMD <b>VMMCALL</b> 触发硬件陷入</li>
+        <li>切到 monitor 私有栈 → <span class="cy">vmexit_handler</span></li>
+      </ul>
+      <div class="tags"><span class="tag b">ring0 / ring3 均可发起</span></div>
+    </div>
+    <div class="card g">
+      <div class="c-head"><span class="dot"></span><span class="c-title">Ⅱ 校验 · 分发</span></div>
+      <div class="c-en">Validate &amp; Dispatch</div>
+      <div class="chain"><span class="chip b">from_regs</span><span class="arr">→ 校验 →</span><span class="chip g">handler</span></div>
+      <ul class="pts">
+        <li><b>特权级</b>：CS.DPL vs code bit31，不符注入 <span class="cy">#UD</span></li>
+        <li><b>状态</b>：validate_state 查 CpuState，不符注入 #UD</li>
+        <li><b>指针</b>：GVA 经 L1 CR3 页表 → GPA（marshalling），绝不直接解引用</li>
+      </ul>
+      <div class="tags"><span class="tag g">bit31 = 特权级</span><span class="tag g">CpuState 校验</span></div>
+    </div>
+    <div class="card v">
+      <div class="c-head"><span class="dot"></span><span class="c-title">Ⅲ 返回 · 续跑</span></div>
+      <div class="c-en">Trap Out</div>
+      <div class="chain"><span class="chip b">set_return_val</span><span class="arr">→ VMEntry →</span><span class="chip g">L1 续跑</span></div>
+      <ul class="pts">
+        <li>结果写回 <span class="cy">RAX</span>；HvError 注入 #GP、EnclaveError 返回码</li>
+        <li><b>advance_rip</b> 跳过 VMCALL 指令本身</li>
+        <li>L1 从下一条指令继续，读 RAX 得返回值 / 错误码</li>
+      </ul>
+      <div class="tags"><span class="tag g">RAX = 结果</span><span class="tag b">40+ handler</span></div>
+    </div>
+  </div>
+  <div class="s-foot"><span>一句话：把 SGX 的 ring 转换语义，映射成 hypercall 编码 + 状态机双重校验</span><span class="no">图 2 · Hypercall 流程</span></div>
+</section>
+
+<!-- ============ 屏 3：系统调用三情形 ============ -->
+<section class="slide" id="s3">
+  <div class="s-head">
+    <div class="s-title">系统调用路径<span class="hl">三情形谱系</span></div>
+    <div class="s-sub">L1 降级后 syscall 会不会 VM-Exit —— 三种情形的"对手"不同</div>
+  </div>
+  <div class="s-rule"></div>
+  <div class="concl">
+    <div class="lab">核心结论</div>
+    <div class="txt">普通世界 syscall <b>零 exit 直通</b>；Enclave 内 SYSCALL 因 <span class="w">EFER.SCE=0</span> 触发 <b>#UD → AEX 被禁</b>；正确 I/O 只能 <span class="w">EEXIT 由非信任运行时代理</span> + 共享内存编组 —— Enclave 与内核无直接接口</div>
+  </div>
+  <div class="cards c3">
+    <div class="card g">
+      <div class="c-head"><span class="dot"></span><span class="c-title">Ⅰ 普通世界直通</span></div>
+      <div class="c-en">Normal World Passthrough</div>
+      <div class="chain"><span class="chip g">SYSCALL</span><span class="arr">→ LSTAR →</span><span class="chip g">Linux 内核</span></div>
+      <ul class="pts">
+        <li><b>EFER.SCE=1</b>，syscall 机制启用</li>
+        <li>VMX <b>不拦截 SYSCALL 指令</b>（无对应 exit）</li>
+        <li>monitor 完全不参与，Linux 原生全速处理</li>
+      </ul>
+      <div class="tags"><span class="tag g">零 VM-Exit</span><span class="tag g">全速</span></div>
+    </div>
+    <div class="card r">
+      <div class="c-head"><span class="dot"></span><span class="c-title">Ⅱ Enclave 内禁用</span></div>
+      <div class="c-en">Enclave Syscall Blocked</div>
+      <div class="chain"><span class="chip g">SYSCALL</span><span class="arr">→ #UD →</span><span class="chip r">AEX 弹回</span></div>
+      <ul class="pts">
+        <li>EENTER 已从 EFER <b>减去 SCE</b>（禁 syscall）</li>
+        <li>SCE=0 时 SYSCALL 在<b>硬件层触发 #UD</b></li>
+        <li>全异常拦截 → 存 SSA → 向 AEP 注入 #UD，弹回普通世界</li>
+      </ul>
+      <div class="tags"><span class="tag r">禁直接 syscall</span><span class="tag b">#UD → AEX</span></div>
+    </div>
+    <div class="card b">
+      <div class="c-head"><span class="dot"></span><span class="c-title">Ⅲ 正确 I/O（OCALL）</span></div>
+      <div class="c-en">Controlled Exit</div>
+      <div class="chain"><span class="chip b">EEXIT</span><span class="arr">→ 代理 syscall →</span><span class="chip g">ERESUME</span></div>
+      <ul class="pts">
+        <li>syscall 由<b>非信任运行时</b>在普通世界代做</li>
+        <li>数据经 <span class="cy">SharedMemoryAdd 白名单</span> 共享内存编组跨界</li>
+        <li>受控出站：把"直接接口"收窄为"经常校验的间接接口"</li>
+      </ul>
+      <div class="tags"><span class="tag g">受控出站</span><span class="tag b">共享内存编组</span></div>
+    </div>
+  </div>
+  <div class="s-foot"><span>一句话：Enclave 的 I/O 攻击面 = 一块经 monitor 校验的共享内存，而非整个内核 ABI</span><span class="no">图 3 · Syscall 路径</span></div>
+</section>
+
+<!-- ============ 屏 4：Enclave 世界切换 ============ -->
+<section class="slide" id="s4">
+  <div class="s-head">
+    <div class="s-title">Enclave 世界切换<span class="hl">四路转换</span></div>
+    <div class="s-sub">共享同一 vCPU 的"视图寄存器原子替换" —— 不是 VM 切换，是页表指针级开销</div>
+  </div>
+  <div class="s-rule"></div>
+  <div class="concl">
+    <div class="lab">核心结论</div>
+    <div class="txt"><span class="w">EENTER / ERESUME</span> 仅 HvEnabled 发起、<span class="w">EEXIT / EACCEPT</span> 仅 EnclaveRunning 发起（validate_state 强制）；<b>AEX 是唯一被动转换</b> —— 存现场到 SSA 后把寄存器摆成"刚从 EnclaveEnter 返回"，交由普通世界 AEP 接管</div>
+  </div>
+  <div class="cards c4">
+    <div class="card g">
+      <div class="c-head"><span class="dot"></span><span class="c-title">EENTER</span></div>
+      <div class="c-en">0x8000_0000 · Enter</div>
+      <div class="chain"><span class="chip b">HvEnabled</span><span class="arr">→</span><span class="chip g">EnclaveRunning</span></div>
+      <ul class="pts">
+        <li>存 normal_state（RSP/RBP → SSA.ursp/urbp）</li>
+        <li>切 NPT+GPT root、IDTR=0、<b>清 SCE</b></li>
+      </ul>
+      <div class="tags"><span class="tag g">主动进入</span></div>
+    </div>
+    <div class="card b">
+      <div class="c-head"><span class="dot"></span><span class="c-title">EEXIT</span></div>
+      <div class="c-en">0x8000_0001 · Exit</div>
+      <div class="chain"><span class="chip g">EnclaveRunning</span><span class="arr">→</span><span class="chip b">HvEnabled</span></div>
+      <ul class="pts">
+        <li>恢复 normal_world_state（页表/IDT/EFER）</li>
+        <li>RCX=AEP，is_active=false</li>
+      </ul>
+      <div class="tags"><span class="tag g">主动退出</span></div>
+    </div>
+    <div class="card r">
+      <div class="c-head"><span class="dot"></span><span class="c-title">AEX</span></div>
+      <div class="c-en">Async · Passive</div>
+      <div class="chain"><span class="chip r">异常 / 中断</span><span class="arr">→</span><span class="chip b">HvEnabled</span></div>
+      <ul class="pts">
+        <li>寄存器 + XSAVE → SSA.gpr，<b>cssa+=1</b></li>
+        <li>置 RAX=EnclaveResume、RCX=AEP</li>
+      </ul>
+      <div class="tags"><span class="tag r">被动</span><span class="tag b">cssa+=1</span></div>
+    </div>
+    <div class="card v">
+      <div class="c-head"><span class="dot"></span><span class="c-title">ERESUME</span></div>
+      <div class="c-en">0x8000_0005 · Resume</div>
+      <div class="chain"><span class="chip b">HvEnabled</span><span class="arr">→</span><span class="chip g">EnclaveRunning</span></div>
+      <ul class="pts">
+        <li>从 SSA(cssa-1) 恢复寄存器 + XSAVE，<b>cssa-=1</b></li>
+        <li>校验 xfrm；同步共享内存映射</li>
+      </ul>
+      <div class="tags"><span class="tag g">恢复</span><span class="tag b">cssa-=1</span></div>
+    </div>
+  </div>
+  <div class="s-foot"><span>一句话：Enclave 进出 = 一次 hypercall 内原子替换视图寄存器 + 两套线程状态保存/恢复</span><span class="no">图 4 · 世界切换</span></div>
+</section>
+
+</body>
+</html>

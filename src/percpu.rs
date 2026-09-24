@@ -18,7 +18,7 @@ use core::mem::size_of;
 use core::sync::atomic::{AtomicIsize, Ordering};
 
 use crate::arch::vmm::{Vcpu, VcpuAccessGuestState};
-use crate::arch::{ExceptionType, HostPageTable, LinuxContext};
+use crate::arch::{CpuidPolicy, ExceptionType, HostPageTable, LinuxContext, VcpuMsrState};
 use crate::cell::Cell;
 use crate::consts::{HV_STACK_SIZE, LOCAL_PER_CPU_BASE};
 use crate::enclave::epcm::EpcmManager;
@@ -52,6 +52,10 @@ pub struct PerCpu {
     linux: LinuxContext,
     hvm: MemorySet<HostPageTable>,
     enclave_thread: EnclaveThread,
+    /// Per-vCPU mirror for Emulate-class MSRs (vendor-independent).
+    pub msr_state: VcpuMsrState,
+    /// Per-CPU CPUID emulation policy with the activation snapshot.
+    pub cpuid_policy: CpuidPolicy,
 }
 
 impl PerCpu {
@@ -115,6 +119,11 @@ impl PerCpu {
             // avoid dropping, same below
             core::ptr::write(&mut self.hvm, hvm);
             core::ptr::write(&mut self.enclave_thread, EnclaveThread::new());
+            // Snapshot the real hardware MSR state and freeze the CPUID
+            // topology leaves while still running in the Linux context,
+            // before the first VM entry.
+            core::ptr::write(&mut self.msr_state, VcpuMsrState::new());
+            core::ptr::write(&mut self.cpuid_policy, CpuidPolicy::snapshot());
             self.hvm.activate();
             core::ptr::write(&mut self.vcpu, Vcpu::new(&self.linux, cell)?);
         }

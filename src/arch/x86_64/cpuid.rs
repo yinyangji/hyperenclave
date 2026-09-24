@@ -14,6 +14,8 @@
 
 #![cfg_attr(not(feature = "intel"), allow(dead_code))]
 
+use alloc::collections::BTreeMap;
+
 use bitflags::bitflags;
 
 pub use raw_cpuid::{cpuid, CpuId};
@@ -168,6 +170,206 @@ bitflags! {
     }
 }
 
+// Leaf 7 (Structured Extended Feature Flags), sub-leaf 0.
+/// EBX[2]: SGX.
+const LEAF7_EBX_SGX: u32 = 1 << 2;
+/// EBX[25]: Intel Processor Trace.
+const LEAF7_EBX_PT: u32 = 1 << 25;
+/// ECX[16]: 5-level paging.
+const LEAF7_ECX_LA57: u32 = 1 << 16;
+/// EDX[18]: SGX Launch Control.
+const LEAF7_EDX_SGX_LC: u32 = 1 << 18;
+
+/// The "HyperEnclave" signature reported by CPUID leaf 0x40000000 in
+/// EBX/ECX/EDX (twelve ASCII bytes as three little-endian words). Built
+/// at compile time: a string literal has no alignment guarantee, so
+/// reading it as u32s through a raw pointer would be unaligned UB.
+const SIGNATURE: [u32; 3] = [
+    u32::from_le_bytes(*b"Hype"),
+    u32::from_le_bytes(*b"rEnc"),
+    u32::from_le_bytes(*b"lave"),
+];
+
+/// Address width the guest can actually use: the monitor's nested page
+/// tables (EPT/NPT, 4 levels) address at most 48 bits. Leaf 0x80000008
+/// encodes the virtual width in EAX[15:8], the physical one in EAX[7:0].
+const GUEST_ADDR_WIDTH: u32 = 48;
+
+/// One CPUID result: the four registers the guest must see.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct CpuidRegs {
+    pub eax: u32,
+    pub ebx: u32,
+    pub ecx: u32,
+    pub edx: u32,
+}
+
+/// Execute the real CPUID on this CPU.
+fn raw_cpuid_regs(leaf: u32, subleaf: u32) -> CpuidRegs {
+    let res = cpuid!(leaf, subleaf);
+    CpuidRegs {
+        eax: res.eax,
+        ebx: res.ebx,
+        ecx: res.ecx,
+        edx: res.edx,
+    }
+}
+
+/// CPUID emulation policy (G3): vendor-independent.
+///
+/// Both vendors intercept every CPUID and route it here. Two kinds of
+/// treatment:
+/// - Topology leaves (4 / 0xB / 0x1F) are replayed from an activation
+///   snapshot, so the guest can never observe a difference between the
+///   pre-activation and post-activation views of its own CPU.
+/// - Everything else executes the real CPUID and gets the policy masks
+///   applied: the virtualization extensions the guest must not enable
+///   (VMX/SVM) and the features the monitor does not mediate (SGX and its
+///   enumeration leaf 0x12, Processor Trace, 5-level paging) are hidden,
+///   and the address-width enumeration is pinned to what the nested page
+///   tables actually support.
+pub struct CpuidPolicy {
+    /// Stealth mode: hide the hypervisor self-identification (signature
+    /// leaves and the CPUID.1.ECX[31] HYPERVISOR bit) so the guest believes
+    /// it is on bare metal. Defaults to false: the driver and the SGX SDK
+    /// rely on the self-identification.
+    pub stealth: bool,
+    /// (leaf, subleaf) -> registers, frozen at activation time.
+    snapshots: BTreeMap<(u32, u32), CpuidRegs>,
+}
+
+impl CpuidPolicy {
+    /// Snapshot the topology leaves while still running in the Linux
+    /// context, before the first VM entry.
+    pub fn snapshot() -> Self {
+        let mut snapshots = BTreeMap::new();
+
+        // Leaf 4 (deterministic cache parameters): sub-leaves enumerate the
+        // cache hierarchy and stop at the first entry whose cache type
+        // (EAX[4:0]) is zero.
+        for sub in 0..16u32 {
+            let regs = raw_cpuid_regs(4, sub);
+            let last = regs.eax & 0x1f == 0;
+            snapshots.insert((4, sub), regs);
+            if last {
+                break;
+            }
+        }
+        // Leaves 0xB / 0x1F (topology enumerations): sub-leaves enumerate
+        // the topology levels and stop at the first invalid one
+        // (ECX[15:8] == 0).
+        for leaf in [0xb, 0x1f] {
+            for sub in 0..4u32 {
+                let regs = raw_cpuid_regs(leaf, sub);
+                let invalid = regs.ecx & 0xff00 == 0;
+                snapshots.insert((leaf, sub), regs);
+                if invalid {
+                    break;
+                }
+            }
+        }
+
+        Self {
+            stealth: false,
+            snapshots,
+        }
+    }
+
+    /// Serve one CPUID query: return the registers the guest must see.
+    /// `guest_osxsave` mirrors the guest CR4.OSXSAVE (the XSETBV
+    /// interception keeps the real XCR0 authoritative for the guest OS).
+    pub fn emulate(&self, leaf: u32, subleaf: u32, guest_osxsave: bool) -> CpuidRegs {
+        // Self-identification. In stealth mode it is skipped and the
+        // fall-through reports the bare-metal values (no hypervisor leaf).
+        if !self.stealth {
+            if leaf == CpuIdEax::HypervisorInfo as u32 {
+                return CpuidRegs {
+                    eax: CpuIdEax::HypervisorFeatures as u32,
+                    ebx: SIGNATURE[0],
+                    ecx: SIGNATURE[1],
+                    edx: SIGNATURE[2],
+                };
+            } else if leaf == CpuIdEax::HypervisorFeatures as u32 {
+                return CpuidRegs::default();
+            }
+        }
+
+        // Topology leaves: replay the activation snapshot.
+        if let Some(regs) = self.snapshots.get(&(leaf, subleaf)) {
+            return *regs;
+        }
+
+        // Everything else: the real CPUID, masked by the policy.
+        let mut regs = raw_cpuid_regs(leaf, subleaf);
+        apply_masks(leaf, subleaf, &mut regs, guest_osxsave, self.stealth);
+        regs
+    }
+}
+
+/// Apply the vendor-independent policy masks to a raw CPUID result.
+fn apply_masks(
+    leaf: u32,
+    subleaf: u32,
+    regs: &mut CpuidRegs,
+    guest_osxsave: bool,
+    stealth: bool,
+) {
+    match leaf {
+        // Leaf 1: x86 feature information.
+        1 => {
+            let mut flags = FeatureInfoFlags::from_bits_truncate(regs.ecx as u64);
+            // The guest must not enable VMX itself; the monitor owns it.
+            flags.remove(FeatureInfoFlags::VMX);
+            // OSXSAVE mirrors the guest CR4 (the XSETBV hypercall keeps
+            // the real XCR0 in sync).
+            if guest_osxsave {
+                flags.insert(FeatureInfoFlags::OSXSAVE);
+            } else {
+                flags.remove(FeatureInfoFlags::OSXSAVE);
+            }
+            // Self-identification (or stealth).
+            if stealth {
+                flags.remove(FeatureInfoFlags::HYPERVISOR);
+            } else {
+                flags.insert(FeatureInfoFlags::HYPERVISOR);
+            }
+            regs.ecx = flags.bits() as u32;
+        }
+        // Leaf 7: structured extended feature flags.
+        7 if subleaf == 0 => {
+            regs.ebx &= !(LEAF7_EBX_SGX | LEAF7_EBX_PT);
+            regs.ecx &= !LEAF7_ECX_LA57;
+            regs.edx &= !LEAF7_EDX_SGX_LC;
+        }
+        // Leaf 0x12: SGX enumeration — zero the whole leaf, consistent
+        // with hiding the SGX feature bit in leaf 7 (a guest probing SGX
+        // must never see the feature bit without the enumeration).
+        0x12 => *regs = CpuidRegs::default(),
+        // Leaf 0x80000001: AMD extended feature flags.
+        0x8000_0001 => {
+            let mut flags = FeatureInfoFlags::from_bits_truncate(regs.ecx as u64);
+            // The guest must not enable SVM itself; the monitor owns it.
+            flags.remove(FeatureInfoFlags::SVM);
+            regs.ecx = flags.bits() as u32;
+        }
+        // Leaf 0x80000008: address sizes. Pin them to what the nested page
+        // tables (EPT/NPT, 4 levels) actually support. LA57 activation is
+        // already refused by the fail-fast check, so a 48-bit virtual
+        // width is always the truth.
+        0x8000_0008 => {
+            let phys_width = regs.eax & 0xff;
+            regs.eax = (regs.eax & !0xffff)
+                | GUEST_ADDR_WIDTH << 8
+                | phys_width.min(GUEST_ADDR_WIDTH);
+        }
+        // Leaf 0xD keeps its bare-metal values: the monitor's xsave
+        // management (xcr0_supported_bits / xsave_state_info) is built on
+        // the same native enumeration, so guest and monitor stay in sync
+        // by construction.
+        _ => {}
+    }
+}
+
 pub struct CpuFeatures {
     cpuid: CpuId<raw_cpuid::CpuIdReaderNative>,
 }
@@ -261,5 +463,129 @@ impl CpuFeatures {
         } else {
             0
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_masks_hide_virtualization() {
+        // Leaf 1: VMX hidden, OSXSAVE mirrors the guest CR4, self-identity.
+        let mut r = CpuidRegs {
+            ecx: FeatureInfoFlags::VMX.bits() as u32 | 0x1, // keep an unrelated bit
+            ..Default::default()
+        };
+        apply_masks(1, 0, &mut r, true, false);
+        assert_eq!(r.ecx & FeatureInfoFlags::VMX.bits() as u32, 0);
+        assert_ne!(r.ecx & FeatureInfoFlags::OSXSAVE.bits() as u32, 0);
+        assert_ne!(r.ecx & FeatureInfoFlags::HYPERVISOR.bits() as u32, 0);
+        assert_ne!(r.ecx & 0x1, 0, "unrelated feature bits must be preserved");
+        apply_masks(1, 0, &mut r, false, true);
+        assert_eq!(r.ecx & FeatureInfoFlags::OSXSAVE.bits() as u32, 0);
+        assert_eq!(r.ecx & FeatureInfoFlags::HYPERVISOR.bits() as u32, 0);
+        // Leaf 0x80000001: SVM hidden.
+        let mut r = CpuidRegs {
+            ecx: FeatureInfoFlags::SVM.bits() as u32 | 0x100,
+            ..Default::default()
+        };
+        apply_masks(0x8000_0001, 0, &mut r, false, false);
+        assert_eq!(r.ecx & FeatureInfoFlags::SVM.bits() as u32, 0);
+        assert_ne!(r.ecx & 0x100, 0);
+    }
+
+    #[test]
+    fn test_masks_hide_sgx_and_tracing() {
+        // Leaf 7 sub-leaf 0: SGX / PT / LA57 / SGX_LC hidden.
+        let mut r = CpuidRegs {
+            ebx: LEAF7_EBX_SGX | LEAF7_EBX_PT,
+            ecx: LEAF7_ECX_LA57,
+            edx: LEAF7_EDX_SGX_LC,
+            ..Default::default()
+        };
+        apply_masks(7, 0, &mut r, false, false);
+        assert_eq!(r.ebx & (LEAF7_EBX_SGX | LEAF7_EBX_PT), 0);
+        assert_eq!(r.ecx & LEAF7_ECX_LA57, 0);
+        assert_eq!(r.edx & LEAF7_EDX_SGX_LC, 0);
+        // Leaf 0x12: the whole SGX enumeration is zeroed, on any sub-leaf.
+        let full = CpuidRegs {
+            eax: 1,
+            ebx: 2,
+            ecx: 3,
+            edx: 4,
+        };
+        let mut r = full;
+        apply_masks(0x12, 0, &mut r, false, false);
+        assert_eq!(r, CpuidRegs::default());
+        let mut r = full;
+        apply_masks(0x12, 1, &mut r, false, false);
+        assert_eq!(r, CpuidRegs::default());
+        // Leaf 7 sub-leaf != 0 is not masked.
+        let mut r = CpuidRegs {
+            ebx: LEAF7_EBX_SGX,
+            ..Default::default()
+        };
+        apply_masks(7, 1, &mut r, false, false);
+        assert_ne!(r.ebx & LEAF7_EBX_SGX, 0);
+    }
+
+    #[test]
+    fn test_masks_pin_address_width() {
+        // A hypothetical LA57 host: VA width 55 gets pinned to 48.
+        let mut r = CpuidRegs {
+            eax: 0x3730,
+            ..Default::default()
+        };
+        apply_masks(0x8000_0008, 0, &mut r, false, false);
+        assert_eq!(r.eax & 0xff, 48);
+        assert_eq!((r.eax >> 8) & 0xff, 48);
+        // A narrower machine: the physical width keeps its real value.
+        let mut r = CpuidRegs {
+            eax: 0x3028,
+            ..Default::default()
+        };
+        apply_masks(0x8000_0008, 0, &mut r, false, false);
+        assert_eq!(r.eax & 0xff, 40);
+        assert_eq!((r.eax >> 8) & 0xff, 48);
+        // Bits above the two width fields are preserved.
+        let mut r = CpuidRegs {
+            eax: 0xff00_3730,
+            ..Default::default()
+        };
+        apply_masks(0x8000_0008, 0, &mut r, false, false);
+        assert_eq!(r.eax >> 16, 0xff00);
+    }
+
+    /// Integration on the real CPU this test runs on: the snapshot must
+    /// replay the frozen leaves and the hidden bits must stay hidden
+    /// whatever the host reports.
+    #[test]
+    fn test_policy_on_real_cpu() {
+        let policy = CpuidPolicy::snapshot();
+        // Topology replay is exactly what the CPU reports right now.
+        assert_eq!(policy.emulate(4, 0, false), raw_cpuid_regs(4, 0));
+        assert_eq!(policy.emulate(0xb, 0, false), raw_cpuid_regs(0xb, 0));
+        // Self-identification signature.
+        let sig = policy.emulate(CpuIdEax::HypervisorInfo as u32, 0, false);
+        assert_eq!(sig.eax, CpuIdEax::HypervisorFeatures as u32);
+        assert_eq!(&sig.ebx.to_le_bytes(), b"Hype");
+        assert_eq!(&sig.edx.to_le_bytes(), b"lave");
+        let features = policy.emulate(CpuIdEax::HypervisorFeatures as u32, 0, false);
+        assert_eq!(features, CpuidRegs::default());
+        // Hidden bits stay hidden on this host.
+        let l1 = policy.emulate(1, 0, false);
+        assert_eq!(l1.ecx & FeatureInfoFlags::VMX.bits() as u32, 0);
+        assert_ne!(l1.ecx & FeatureInfoFlags::HYPERVISOR.bits() as u32, 0);
+        let ext = policy.emulate(CpuIdEax::AmdFeatureInfo as u32, 0, false);
+        assert_eq!(ext.ecx & FeatureInfoFlags::SVM.bits() as u32, 0);
+        let l7 = policy.emulate(7, 0, false);
+        assert_eq!(l7.ebx & (LEAF7_EBX_SGX | LEAF7_EBX_PT), 0);
+        assert_eq!(l7.ecx & LEAF7_ECX_LA57, 0);
+        assert_eq!(l7.edx & LEAF7_EDX_SGX_LC, 0);
+        assert_eq!(policy.emulate(0x12, 0, false), CpuidRegs::default());
+        let aw = policy.emulate(0x8000_0008, 0, false);
+        assert_eq!((aw.eax >> 8) & 0xff, GUEST_ADDR_WIDTH);
+        assert!(aw.eax & 0xff <= GUEST_ADDR_WIDTH);
     }
 }

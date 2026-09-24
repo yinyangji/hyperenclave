@@ -24,6 +24,7 @@ use x86_64::registers::model_specific::{Efer, EferFlags};
 use x86_64::registers::rflags::RFlags;
 use x86_64::structures::DescriptorTablePointer;
 
+use crate::arch::msr::policy::{self, MsrAction};
 use crate::arch::segmentation::Segment;
 use crate::arch::vmm::VcpuAccessGuestState;
 use crate::arch::{GuestPageTableImmut, GuestRegisters, LinuxContext};
@@ -41,8 +42,66 @@ pub struct Vcpu {
     host_stack_top: u64,
     /// host state-save area.
     host_save_area: Frame,
+    /// MSR permission map backing the MSR_PROT interception.
+    msrpm: MsrPermissionMap,
     /// Virtual machine control block.
     pub(super) vmcb: Vmcb,
+}
+
+/// AMD SVM MSR permission map (APM Vol 2, §15.10): three 2048-byte ranges
+/// covering 0x0000_0000..=0x0000_1FFF, 0xC000_0000..=0xC000_1FFF and
+/// 0xC001_0000..=0xC001_1FFF (6144 bytes total). Two permission bits per
+/// MSR (LSB = read, bit 1 = write); a set bit means "intercept".
+///
+/// Like the Intel MSR bitmap, the map starts zeroed (bare-metal semantics:
+/// everything passes through) and only the policy table's non-passthrough
+/// entries set bits, so both vendors encode exactly the same policy.
+struct MsrPermissionMap {
+    /// Two pages (8 KiB): the smallest allocation that keeps the base
+    /// 4-KiB aligned, as VMRUN requires. Only the first 6144 bytes are used.
+    frame: Frame,
+}
+
+/// Offset (byte, bit) of `msr`'s permission bit inside the 6144-byte map.
+/// `None` for MSRs outside the three ranges: they cannot be trapped and
+/// keep bare-metal semantics.
+fn permission_bit(msr: u32, is_write: bool) -> Option<(usize, u8)> {
+    let (range_bytes, msr_base) = match msr {
+        0x0..=0x1fff => (0usize, 0u32),
+        0xc000_0000..=0xc000_1fff => (2048, 0xc000_0000),
+        0xc001_0000..=0xc001_1fff => (4096, 0xc001_0000),
+        _ => return None,
+    };
+    let bit = range_bytes * 8 + (msr - msr_base) as usize * 2 + is_write as usize;
+    Some((bit / 8, (bit % 8) as u8))
+}
+
+/// Encode the shared MSR policy table into a zeroed permission map.
+fn apply_policy(map: &mut [u8]) {
+    debug_assert!(map.len() >= 3 * 2048);
+    for entry in policy::MSR_POLICY_TABLE.iter() {
+        for msr in entry.first..=entry.last {
+            if entry.read != MsrAction::Passthrough {
+                if let Some((byte, bit)) = permission_bit(msr, false) {
+                    map[byte] |= 1 << bit;
+                }
+            }
+            if entry.write != MsrAction::Passthrough {
+                if let Some((byte, bit)) = permission_bit(msr, true) {
+                    map[byte] |= 1 << bit;
+                }
+            }
+        }
+    }
+}
+
+impl MsrPermissionMap {
+    fn new() -> HvResult<Self> {
+        let mut frame = Frame::new_contiguous(2, 12)?;
+        frame.zero();
+        apply_policy(frame.as_slice_mut());
+        Ok(Self { frame })
+    }
 }
 
 impl Vcpu {
@@ -94,6 +153,7 @@ impl Vcpu {
             return hv_result_err!(EBUSY, "SVM is already turned on!");
         }
         let host_save_area = Frame::new()?;
+        let msrpm = MsrPermissionMap::new()?;
         unsafe { Efer::write(efer | EferFlags::SECURE_VIRTUAL_MACHINE_ENABLE) };
         unsafe { Msr::VM_HSAVE_PA.write(host_save_area.start_paddr() as _) };
         info!("successed to turn on SVM.");
@@ -107,6 +167,7 @@ impl Vcpu {
         let mut ret = Self {
             guest_regs: Default::default(),
             host_save_area,
+            msrpm,
             host_stack_top: PerCpu::from_local_base().stack_top() as _,
             vmcb: Default::default(),
         };
@@ -255,6 +316,9 @@ impl Vcpu {
         vmcb.clean_bits = VmcbCleanBits::empty(); // Explicitly mark all of the state as new
         vmcb.nest_cr3 = cell.gpm.page_table().root_paddr() as _;
         vmcb.tlb_control = VmcbTlbControl::FlushAsid as _;
+        // The base must be 4-KiB aligned (a VMRUN validity requirement
+        // whenever the MSR_PROT interception is active).
+        vmcb.msrpm_base_pa = self.msrpm.frame.start_paddr() as _;
 
         self.vmcb.set_intercept(SvmIntercept::NMI, true);
         self.vmcb.set_intercept(SvmIntercept::CPUID, true);
@@ -266,6 +330,7 @@ impl Vcpu {
         self.vmcb.set_intercept(SvmIntercept::STGI, true);
         self.vmcb.set_intercept(SvmIntercept::CLGI, true);
         self.vmcb.set_intercept(SvmIntercept::SKINIT, true);
+        self.vmcb.set_intercept(SvmIntercept::MSR_PROT, true);
     }
 
     fn load_vmcb_guest(&self, linux: &mut LinuxContext) {
@@ -353,6 +418,57 @@ impl VcpuAccessGuestState for Vcpu {
             _ => unreachable!(),
         }
     }
+
+    // AreaSwap-class MSRs. #VMEXIT does not write them back into the VMCB
+    // save area (a direct hardware access would be lost on the next
+    // VMRUN), so the MSRPM routes every access here and the handlers
+    // read/write the VMCB save fields that VMRUN loads.
+    fn rdmsr_virt(&self, msr: u32) -> Option<u64> {
+        let save = &self.vmcb.save;
+        match msr {
+            0x174 => Some(save.sysenter_cs),
+            0x175 => Some(save.sysenter_esp),
+            0x176 => Some(save.sysenter_eip),
+            0x277 => Some(save.g_pat),
+            // SVME is the hypervisor's own EFER bit; the guest never sees it.
+            0xc000_0080 => Some(save.efer & !EferFlags::SECURE_VIRTUAL_MACHINE_ENABLE.bits()),
+            0xc000_0081 => Some(save.star),
+            0xc000_0082 => Some(save.lstar),
+            0xc000_0083 => Some(save.cstar),
+            0xc000_0084 => Some(save.sfmask),
+            0xc000_0100 => Some(save.fs.base),
+            0xc000_0101 => Some(save.gs.base),
+            0xc000_0102 => Some(save.kernel_gs_base),
+            _ => None,
+        }
+    }
+
+    fn wrmsr_virt(&mut self, msr: u32, val: u64) -> HvResult {
+        let save = &mut self.vmcb.save;
+        match msr {
+            0x174 => save.sysenter_cs = val,
+            0x175 => save.sysenter_esp = val,
+            0x176 => save.sysenter_eip = val,
+            0x277 => save.g_pat = val,
+            0xc000_0080 => {
+                // The guest may only flip software-writable bits; SVME (and
+                // LME/LMA from the VMCB setup) must stay set or the next
+                // VMRUN would fail its consistency checks. (SCE arbitration
+                // for HU-Enclave hooks in here later.)
+                const EFER_WRITABLE: u64 = 0x1 | 1 << 11 | 1 << 14; // SCE | NXE | FFXSR
+                save.efer = (save.efer & !EFER_WRITABLE) | (val & EFER_WRITABLE);
+            }
+            0xc000_0081 => save.star = val,
+            0xc000_0082 => save.lstar = val,
+            0xc000_0083 => save.cstar = val,
+            0xc000_0084 => save.sfmask = val,
+            0xc000_0100 => save.fs.base = val,
+            0xc000_0101 => save.gs.base = val,
+            0xc000_0102 => save.kernel_gs_base = val,
+            _ => return hv_result_err!(EINVAL, format!("no VMCB backing for MSR {:#x}", msr)),
+        }
+        Ok(())
+    }
 }
 
 impl Debug for Vcpu {
@@ -387,4 +503,38 @@ unsafe extern "sysv64" fn svm_run() -> ! {
         sym crate::arch::vmm::vmexit_handler,
         sym svm_run,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The permission map must encode the policy table: passthrough stays
+    /// clear, everything else is intercepted; MSRs outside the map cannot
+    /// be trapped at all and keep bare-metal semantics.
+    #[test]
+    fn test_msrpm_follows_policy() {
+        let mut map = [0u8; 3 * 2048];
+        apply_policy(&mut map);
+
+        let intercepted = |msr: u32, is_write: bool| -> bool {
+            permission_bit(msr, is_write).map_or(false, |(byte, bit)| map[byte] & (1 << bit) != 0)
+        };
+        // Passthrough: no interception bits.
+        assert!(!intercepted(0x10, false) && !intercepted(0x10, true)); // TSC
+        assert!(!intercepted(0x6e0, true)); // TSC_DEADLINE
+        assert!(!intercepted(0x808, false)); // x2APIC ICR
+        assert!(!intercepted(0xc001_0015, true)); // AMD HWCR
+        // Non-passthrough actions: both directions intercepted.
+        assert!(intercepted(0x174, false) && intercepted(0x174, true)); // SYSENTER
+        assert!(intercepted(0xc000_0080, false)); // EFER
+        assert!(intercepted(0xc000_0102, false)); // KERNEL_GS_BASE
+        assert!(intercepted(0x480, false)); // VMX capability zone: read hidden
+        // Read-only platform MSRs: read passes, write denied.
+        assert!(!intercepted(0xfe, false) && intercepted(0xfe, true)); // MTRRCAP
+        // MSRs outside the three ranges cannot be trapped at all.
+        assert!(permission_bit(0x2000, false).is_none());
+        assert!(permission_bit(0x4000_0000, false).is_none());
+        assert!(permission_bit(0xc002_0000, false).is_none());
+    }
 }

@@ -28,7 +28,7 @@ use x86_64::addr::VirtAddr;
 use x86_64::registers::control::{Cr0, Cr0Flags, Cr3, Cr4, Cr4Flags};
 use x86_64::registers::rflags::RFlags;
 
-use super::structs::{MsrBitmap, VmxRegion};
+use super::structs::{MsrArea, MsrBitmap, MSR_AREA_COUNT, VmxRegion};
 use crate::arch::cpuid::CpuFeatures;
 use crate::arch::segmentation::{Segment, SegmentAccessRights};
 use crate::arch::tables::{GDTStruct, GDT, IDT};
@@ -47,10 +47,15 @@ pub struct Vcpu {
     guest_regs: GuestRegisters,
     /// RSP will be loaded from here when handle VM exits.
     host_stack_top: u64,
+    /// Guest MSR load/store area: loaded on VM entry, stored on VM exit.
+    /// Shared by VM_ENTRY_MSR_LOAD and VM_EXIT_MSR_STORE (closed loop).
+    guest_msr_area: MsrArea,
+    /// Host MSR load area: loaded on VM exit to restore host values.
+    host_msr_area: MsrArea,
 }
 
 lazy_static! {
-    static ref MSR_BITMAP: MsrBitmap = MsrBitmap::default();
+    static ref MSR_BITMAP: MsrBitmap = MsrBitmap::from_policy();
 }
 
 macro_rules! set_guest_segment {
@@ -140,6 +145,10 @@ impl Vcpu {
             vmcs_region,
             host_stack_top: 0,
             guest_regs: Default::default(),
+            // Before the first vmlaunch the hardware values are the
+            // guest's initial values (we are running in the Linux context).
+            guest_msr_area: MsrArea::from_hardware(),
+            host_msr_area: MsrArea::from_hardware(),
         };
         ret.vmcs_setup(linux, cell)?;
 
@@ -391,9 +400,17 @@ impl Vcpu {
             0,
         )?;
 
-        VmcsField32Control::VM_EXIT_MSR_STORE_COUNT.write(0)?;
-        VmcsField32Control::VM_EXIT_MSR_LOAD_COUNT.write(0)?;
-        VmcsField32Control::VM_ENTRY_MSR_LOAD_COUNT.write(0)?;
+        // Enable the MSR load/store areas for the AreaSwap MSRs without a
+        // VMCS guest field (STAR/LSTAR/CSTAR/SFMASK/KERNEL_GS_BASE). The
+        // entry-load and exit-store areas are the same memory, so a direct
+        // guest write is stored on exit and reloaded on the next entry
+        // (closed loop). Handlers also update the area on trapped writes.
+        VmcsField32Control::VM_EXIT_MSR_STORE_COUNT.write(MSR_AREA_COUNT as u32)?;
+        VmcsField32Control::VM_EXIT_MSR_LOAD_COUNT.write(MSR_AREA_COUNT as u32)?;
+        VmcsField32Control::VM_ENTRY_MSR_LOAD_COUNT.write(MSR_AREA_COUNT as u32)?;
+        VmcsField64Control::VM_EXIT_MSR_STORE_ADDR.write(self.guest_msr_area.paddr() as u64)?;
+        VmcsField64Control::VM_EXIT_MSR_LOAD_ADDR.write(self.host_msr_area.paddr() as u64)?;
+        VmcsField64Control::VM_ENTRY_MSR_LOAD_ADDR.write(self.guest_msr_area.paddr() as u64)?;
 
         VmcsField64Control::CR4_GUEST_HOST_MASK.write(0)?;
         VmcsField32Control::CR3_TARGET_COUNT.write(0)?;
@@ -495,6 +512,50 @@ impl VcpuAccessGuestState for Vcpu {
             Ok(())
         })()
         .expect("Failed to write guest control register")
+    }
+
+    // AreaSwap-class MSRs. VM entry loads them from the VMCS guest fields
+    // (or the MSR load/store area), so a direct hardware write by the guest
+    // would be lost on the next VM exit; the interception bitmap routes
+    // every access here instead.
+    fn rdmsr_virt(&self, msr: u32) -> Option<u64> {
+        match msr {
+            0x174 => Some(VmcsField32Guest::SYSENTER_CS.read().ok()? as u64),
+            0x175 => VmcsField64Guest::SYSENTER_ESP.read().ok(),
+            0x176 => VmcsField64Guest::SYSENTER_EIP.read().ok(),
+            0x277 => VmcsField64Guest::IA32_PAT.read().ok(),
+            0xc000_0080 => VmcsField64Guest::IA32_EFER.read().ok(),
+            0xc000_0100 => VmcsField64Guest::FS_BASE.read().ok(),
+            0xc000_0101 => VmcsField64Guest::GS_BASE.read().ok(),
+            // STAR/LSTAR/CSTAR/SFMASK/KERNEL_GS_BASE live in the MSR area.
+            _ => self.guest_msr_area.get(msr),
+        }
+    }
+
+    fn wrmsr_virt(&mut self, msr: u32, val: u64) -> HvResult {
+        match msr {
+            0x174 => VmcsField32Guest::SYSENTER_CS.write(val as u32)?,
+            0x175 => VmcsField64Guest::SYSENTER_ESP.write(val)?,
+            0x176 => VmcsField64Guest::SYSENTER_EIP.write(val)?,
+            0x277 => VmcsField64Guest::IA32_PAT.write(val)?,
+            0xc000_0080 => {
+                // The guest may only flip software-writable bits; LME/LMA
+                // must stay put or the VM entry consistency checks would
+                // fail. (SCE arbitration for HU-Enclave hooks in here later.)
+                const EFER_WRITABLE: u64 = 0x1 | 1 << 11 | 1 << 14; // SCE | NXE | FFXSR
+                let cur = VmcsField64Guest::IA32_EFER.read()?;
+                VmcsField64Guest::IA32_EFER
+                    .write((cur & !EFER_WRITABLE) | (val & EFER_WRITABLE))?;
+            }
+            0xc000_0100 => VmcsField64Guest::FS_BASE.write(val)?,
+            0xc000_0101 => VmcsField64Guest::GS_BASE.write(val)?,
+            _ => {
+                self.guest_msr_area
+                    .set(msr, val)
+                    .ok_or_else(|| hv_err!(EINVAL, format!("no MSR area entry for {:#x}", msr)))?;
+            }
+        }
+        Ok(())
     }
 }
 

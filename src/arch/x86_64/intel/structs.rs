@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use bit_field::BitField;
+use x86::msr::rdmsr;
 
+use crate::arch::msr::policy::{self, MsrAction};
 use crate::error::HvResult;
 use crate::memory::addr::{phys_encrypted, virt_to_phys};
 use crate::memory::{AlignedPage, Frame, PhysAddr};
@@ -41,10 +43,37 @@ impl VmxRegion {
 pub(super) struct MsrBitmap(AlignedPage);
 
 impl MsrBitmap {
-    fn mask_range(&mut self, msr_range: core::ops::RangeInclusive<u32>, is_write: bool) {
-        for msr in msr_range {
-            self.mask(msr, is_write);
+    /// Whether the Intel MSR bitmap covers `msr` at all. MSRs outside the
+    /// two bitmap windows cannot be trapped; accesses to them fall through
+    /// to the hardware, which raises #GP for non-existent MSRs.
+    fn covers(msr: u32) -> bool {
+        msr <= 0x1fff || (0xc000_0000..=0xc000_1fff).contains(&msr)
+    }
+
+    /// Build the bitmap from the shared MSR policy table: every read/write
+    /// action other than `Passthrough` sets its interception bit. MSRs
+    /// outside the table keep their bare-metal semantics (no interception
+    /// bit, no exit); the common handlers deny them if one ever slips
+    /// through — fail-closed defense in depth.
+    pub fn from_policy() -> Self {
+        let mut map = Self(AlignedPage::new());
+        for entry in policy::MSR_POLICY_TABLE.iter() {
+            if entry.read == MsrAction::Passthrough && entry.write == MsrAction::Passthrough {
+                continue;
+            }
+            for msr in entry.first..=entry.last {
+                if !Self::covers(msr) {
+                    continue;
+                }
+                if entry.read != MsrAction::Passthrough {
+                    map.mask(msr, false);
+                }
+                if entry.write != MsrAction::Passthrough {
+                    map.mask(msr, true);
+                }
+            }
         }
+        map
     }
 
     fn mask(&mut self, msr: u32, is_write: bool) {
@@ -66,7 +95,26 @@ impl MsrBitmap {
             if is_write {
                 ptr = ptr.add(2 << 10);
             }
-            core::slice::from_raw_parts_mut(ptr, 1024)[msr_byte] &= 1 << msr_bit;
+            // Bit set means "intercept": OR the bit in, don't clear it (F1).
+            core::slice::from_raw_parts_mut(ptr, 1024)[msr_byte] |= 1 << msr_bit;
+        }
+    }
+
+    /// Test an interception bit (unit tests / debugging only).
+    #[cfg(test)]
+    fn is_intercepted(&self, msr: u32, is_write: bool) -> bool {
+        let mut ptr = self.0.as_ptr();
+        let msr_low = msr & 0x1fff;
+        let msr_byte = (msr_low / 8) as usize;
+        let msr_bit = (msr_low % 8) as u8;
+        unsafe {
+            if msr >= 0xc000_0000 {
+                ptr = ptr.add(1 << 10);
+            }
+            if is_write {
+                ptr = ptr.add(2 << 10);
+            }
+            core::slice::from_raw_parts(ptr, 1024)[msr_byte] & (1 << msr_bit) != 0
         }
     }
 
@@ -75,49 +123,141 @@ impl MsrBitmap {
     }
 }
 
-impl Default for MsrBitmap {
-    fn default() -> Self {
-        let mut map = Self(AlignedPage::new());
-        // read
-        map.mask(0x277, false); // IA32_PAT
-        map.mask(0x2FF, false); // IA32_MTRR_DEF_TYPE
+/// MSR index/value pairs loaded by VM entry (and stored on VM exit) for
+/// AreaSwap MSRs that have no VMCS guest field.
+/// Layout per Intel SDM Vol.3 §24.7.2/§27.4: 32-bit index, 32 bits reserved,
+/// 64-bit value.
+#[repr(C, align(16))]
+pub(super) struct MsrArea {
+    entries: [(u32, u64); MSR_AREA_COUNT],
+}
 
-        map.mask(0x802, false); // IA32_X2APIC_APICID
-        map.mask(0x803, false); // IA32_X2APIC_VERSION
-        map.mask(0x808, false); // IA32_X2APIC_TPR
-        map.mask(0x80A, false); // IA32_X2APIC_PPR
-        map.mask(0x80D, false); // IA32_X2APIC_LDR
-        map.mask(0x80F, false); // IA32_X2APIC_SIVR
-        map.mask_range(0x810..=0x817, false); // IA32_X2APIC_ISR0..IA32_X2APIC_ISR7
-        map.mask_range(0x818..=0x81F, false); // IA32_X2APIC_TMR0..IA32_X2APIC_TMR7
-        map.mask_range(0x820..=0x827, false); // IA32_X2APIC_IRR0..IA32_X2APIC_IRR7
-        map.mask(0x828, false); // IA32_X2APIC_ESR
-        map.mask(0x82F, false); // IA32_X2APIC_LVT_CMCI
-        map.mask(0x830, false); // IA32_X2APIC_ICR
-        map.mask_range(0x832..=0x837, false); // IA32_X2APIC_LVT_*
-        map.mask(0x838, false); // IA32_X2APIC_INIT_COUNT
-        map.mask(0x839, false); // IA32_X2APIC_CUR_COUNT
-        map.mask(0x83E, false); // IA32_X2APIC_DIV_CONF
+/// AreaSwap MSRs served through the MSR load/store areas: they have no
+/// dedicated VMCS guest field, so the hardware swaps them via the areas.
+/// SYSENTER/EFER/PAT/FS_BASE/GS_BASE instead use VMCS guest fields and are
+/// handled by `Vcpu::rdmsr_virt`/`wrmsr_virt` directly.
+pub(super) const MSR_AREA_MSRS: &[u32] = &[
+    0xc000_0081, // IA32_STAR
+    0xc000_0082, // IA32_LSTAR
+    0xc000_0083, // IA32_CSTAR
+    0xc000_0084, // IA32_FMASK
+    0xc000_0102, // IA32_KERNEL_GS_BASE
+];
 
-        // write
-        map.mask(0x1B, true); // IA32_APIC_BASE
-        map.mask_range(0x200..=0x277, true); // IA32_MTRR_*
-        map.mask(0x277, true); // IA32_PAT
-        map.mask(0x2FF, true); // IA32_MTRR_DEF_TYPE
-        map.mask(0x38F, true); // IA32_PERF_GLOBAL_CTRL
-        map.mask_range(0xC80..=0xD8F, true);
+pub(super) const MSR_AREA_COUNT: usize = MSR_AREA_MSRS.len();
 
-        map.mask(0x808, true); // IA32_X2APIC_TPR
-        map.mask(0x80B, true); // IA32_X2APIC_EOI
-        map.mask(0x80F, true); // IA32_X2APIC_SIVR
-        map.mask(0x828, true); // IA32_X2APIC_ESR
-        map.mask(0x82F, true); // IA32_X2APIC_LVT_CMCI
-        map.mask(0x830, true); // IA32_X2APIC_ICR
-        map.mask_range(0x832..=0x837, true); // IA32_X2APIC_LVT_*
-        map.mask(0x838, true); // IA32_X2APIC_INIT_COUNT
-        map.mask(0x839, true); // IA32_X2APIC_CUR_COUNT
-        map.mask(0x83E, true); // IA32_X2APIC_DIV_CONF
+impl MsrArea {
+    /// Snapshot the current hardware values. Called before the first
+    /// vmlaunch, where the hardware values are the guest's initial ones.
+    pub fn from_hardware() -> Self {
+        let mut entries = [(0, 0); MSR_AREA_COUNT];
+        for (i, &msr) in MSR_AREA_MSRS.iter().enumerate() {
+            entries[i] = (msr, unsafe { rdmsr(msr) });
+        }
+        Self { entries }
+    }
 
-        map
+    pub fn get(&self, msr: u32) -> Option<u64> {
+        self.entries
+            .iter()
+            .find(|(index, _)| *index == msr)
+            .map(|(_, value)| *value)
+    }
+
+    pub fn set(&mut self, msr: u32, value: u64) -> Option<()> {
+        let entry = self.entries.iter_mut().find(|(index, _)| *index == msr)?;
+        entry.1 = value;
+        Some(())
+    }
+
+    pub fn paddr(&self) -> usize {
+        phys_encrypted(virt_to_phys(self as *const _ as usize))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bitmap must faithfully encode the policy table for every MSR it
+    /// can trap. Passthrough MSRs stay clear; everything else (including
+    /// gaps, via the fail-closed default) is intercepted.
+    #[test]
+    fn test_bitmap_follows_policy() {
+        let map = MsrBitmap::from_policy();
+        // Spot-check both bitmap windows, all four quadrants.
+        assert!(!map.is_intercepted(0x6e0, false)); // TSC_DEADLINE: passthrough
+        assert!(!map.is_intercepted(0x6e0, true));
+        assert!(!map.is_intercepted(0x830, true)); // x2APIC ICR: passthrough
+        assert!(map.is_intercepted(0x200, false)); // MTRRphys: emulate
+        assert!(map.is_intercepted(0x200, true));
+        assert!(map.is_intercepted(0x1d9, false)); // DEBUGCTL: emulate
+        assert!(map.is_intercepted(0x174, true)); // SYSENTER: area swap
+        assert!(map.is_intercepted(0x277, true)); // PAT: area swap
+        assert!(map.is_intercepted(0x480, false)); // VMX zone: emulate(0)/deny
+        assert!(map.is_intercepted(0x480, true));
+        assert!(map.is_intercepted(0x570, true)); // RTIT zone: deny write
+        assert!(map.is_intercepted(0xc000_0080, true)); // EFER: area swap
+        assert!(map.is_intercepted(0xc000_0081, true)); // STAR: area swap (write)
+        assert!(map.is_intercepted(0xc000_0081, false)); // STAR: area swap (read)
+        assert!(map.is_intercepted(0xc000_0100, true)); // FS_BASE: area swap
+        assert!(!map.is_intercepted(0xfe, false)); // MTRRCAP: read passthrough
+        assert!(map.is_intercepted(0xfe, true)); // MTRRCAP: write denied
+        // Exhaustive consistency over every table entry that the bitmap
+        // covers (both windows, all four quadrants).
+        for entry in policy::MSR_POLICY_TABLE.iter() {
+            for msr in entry.first..=entry.last {
+                if !MsrBitmap::covers(msr) {
+                    continue;
+                }
+                assert_eq!(
+                    map.is_intercepted(msr, false),
+                    entry.read != MsrAction::Passthrough,
+                    "read mismatch for MSR {:#x}",
+                    msr
+                );
+                assert_eq!(
+                    map.is_intercepted(msr, true),
+                    entry.write != MsrAction::Passthrough,
+                    "write mismatch for MSR {:#x}",
+                    msr
+                );
+            }
+        }
+        // MSRs outside the table keep bare-metal semantics in the map: no
+        // interception bit (the handlers still deny them if one ever slips
+        // through — fail-closed defense in depth).
+        for msr in [0x1u32, 0x9, 0x2e, 0x1fff, 0xc000_0001, 0xc000_1fff] {
+            assert!(
+                !map.is_intercepted(msr, false),
+                "unknown MSR {:#x} must not be intercepted",
+                msr
+            );
+            assert!(
+                !map.is_intercepted(msr, true),
+                "unknown MSR {:#x} must not be intercepted",
+                msr
+            );
+        }
+    }
+
+    #[test]
+    fn test_msr_area_layout() {
+        // Entry layout: u32 index + 32 bits padding + u64 value.
+        assert_eq!(core::mem::size_of::<MsrArea>(), MSR_AREA_COUNT * 16);
+        assert_eq!(core::mem::align_of::<MsrArea>(), 16);
+        // Direct construction: from_hardware() executes rdmsr, which is
+        // privileged and would fault in a unit test.
+        let mut area = MsrArea {
+            entries: [(0, 0); MSR_AREA_COUNT],
+        };
+        for (i, &msr) in MSR_AREA_MSRS.iter().enumerate() {
+            area.entries[i] = (msr, 0x1000 + msr as u64);
+        }
+        assert_eq!(area.get(0xc000_0082), Some(0x1000 + 0xc000_0082));
+        assert!(area.set(0xc000_0081, 0x1234_0000_abcd).is_some());
+        assert_eq!(area.get(0xc000_0081), Some(0x1234_0000_abcd));
+        assert!(area.get(0xc000_0103).is_none()); // TSC_AUX is not in the area
+        assert!(area.set(0x1b, 0).is_none()); // APIC_BASE is not in the area
     }
 }

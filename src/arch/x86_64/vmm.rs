@@ -60,11 +60,18 @@ pub trait VcpuAccessGuestState {
     fn set_xcr0(&mut self, val: u64) {
         unsafe { core::arch::x86_64::_xsetbv(0, val) };
     }
+
+    // MSR virtualization: serve an AreaSwap-class MSR read from the
+    // hardware-managed guest structure (VMCS guest field, MSR load/store
+    // area, or VMCB save area). Returns None if this MSR has no virtualized
+    // backing (programming error; callers treat it as a hard error).
+    fn rdmsr_virt(&self, msr: u32) -> Option<u64>;
+    // MSR virtualization: store an AreaSwap-class MSR write into the
+    // hardware-managed guest structure so that the next VM entry loads it.
+    fn wrmsr_virt(&mut self, msr: u32, val: u64) -> HvResult;
 }
 
 const VM_EXIT_LEN_CPUID: u8 = 2;
-const VM_EXIT_LEN_RDMSR: u8 = 2;
-const VM_EXIT_LEN_WRMSR: u8 = 2;
 const VM_EXIT_LEN_HYPERCALL: u8 = 3;
 
 const HOST_CR4: Cr4Flags = Cr4Flags::from_bits_truncate(
@@ -95,65 +102,30 @@ impl VmExit<'_> {
     }
 
     pub fn handle_msr_read(&mut self) -> HvResult {
-        let guest_regs = self.cpu_data.vcpu.regs_mut();
-        let id = guest_regs.rcx;
-        warn!("VM exit: RDMSR({:#x})", id);
-        // TODO
-        guest_regs.rax = 0;
-        guest_regs.rdx = 0;
-        self.cpu_data.vcpu.advance_rip(VM_EXIT_LEN_RDMSR)?;
-        Ok(())
+        super::msr::handle_rdmsr(self.cpu_data)
     }
 
     pub fn handle_msr_write(&mut self) -> HvResult {
-        let guest_regs = self.cpu_data.vcpu.regs();
-        let id = guest_regs.rcx;
-        let value = guest_regs.rax | (guest_regs.rdx << 32);
-        warn!("VM exit: WRMSR({:#x}) <- {:#x}", id, value);
-        // TODO
-        self.cpu_data.vcpu.advance_rip(VM_EXIT_LEN_WRMSR)?;
-        Ok(())
+        super::msr::handle_wrmsr(self.cpu_data)
     }
 
     pub fn handle_cpuid(&mut self) -> HvResult {
-        use super::cpuid::{cpuid, CpuIdEax, FeatureInfoFlags};
-        let signature = unsafe { &*("HyperEnclave".as_ptr() as *const [u32; 3]) };
-        let cr4_flags = Cr4Flags::from_bits_truncate(self.cpu_data.vcpu.cr(4));
-        let guest_regs = self.cpu_data.vcpu.regs_mut();
-        let function = guest_regs.rax as u32;
-        if function == CpuIdEax::HypervisorInfo as _ {
-            guest_regs.rax = CpuIdEax::HypervisorFeatures as u32 as _;
-            guest_regs.rbx = signature[0] as _;
-            guest_regs.rcx = signature[1] as _;
-            guest_regs.rdx = signature[2] as _;
-        } else if function == CpuIdEax::HypervisorFeatures as _ {
-            guest_regs.rax = 0;
-            guest_regs.rbx = 0;
-            guest_regs.rcx = 0;
-            guest_regs.rdx = 0;
-        } else {
-            let res = cpuid!(guest_regs.rax, guest_regs.rcx);
-            guest_regs.rax = res.eax as _;
-            guest_regs.rbx = res.ebx as _;
-            guest_regs.rcx = res.ecx as _;
-            guest_regs.rdx = res.edx as _;
-
-            if function == CpuIdEax::FeatureInfo as _ || function == CpuIdEax::AmdFeatureInfo as _ {
-                let mut flags = FeatureInfoFlags::from_bits_truncate(guest_regs.rcx as _);
-                if function == CpuIdEax::FeatureInfo as _ {
-                    if cr4_flags.contains(Cr4Flags::OSXSAVE) {
-                        flags.insert(FeatureInfoFlags::OSXSAVE);
-                    }
-                    flags.remove(FeatureInfoFlags::VMX);
-                    flags.insert(FeatureInfoFlags::HYPERVISOR);
-                } else if function == CpuIdEax::AmdFeatureInfo as _ {
-                    flags.remove(FeatureInfoFlags::SVM);
-                }
-                guest_regs.rcx = flags.bits();
-            }
-        }
-        self.cpu_data.vcpu.advance_rip(VM_EXIT_LEN_CPUID)?;
-        Ok(())
+        let (function, subfunction, guest_osxsave) = {
+            let regs = self.cpu_data.vcpu.regs();
+            let guest_osxsave = Cr4Flags::from_bits_truncate(self.cpu_data.vcpu.cr(4))
+                .contains(Cr4Flags::OSXSAVE);
+            (regs.rax as u32, regs.rcx as u32, guest_osxsave)
+        };
+        let result = self
+            .cpu_data
+            .cpuid_policy
+            .emulate(function, subfunction, guest_osxsave);
+        let regs = self.cpu_data.vcpu.regs_mut();
+        regs.rax = result.eax as _;
+        regs.rbx = result.ebx as _;
+        regs.rcx = result.ecx as _;
+        regs.rdx = result.edx as _;
+        self.cpu_data.vcpu.advance_rip(VM_EXIT_LEN_CPUID)
     }
 
     pub fn handle_hypercall(&mut self) -> HvResult {

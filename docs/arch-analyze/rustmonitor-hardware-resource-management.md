@@ -4,8 +4,10 @@
 > Rust hypervisor，Cargo 包名 `rust-hypervisor`）如何管理 VM、如何管理硬件资源，并重点回答：
 > **"host 降级为 L1 后，对硬件的访问会 VM-Exit 到 monitor 吗？"**
 >
-> **图示约定**：每张图提供双版本——上方为看板图（HTML 表格化直观视图，默认展开），下方为
-> Mermaid 源图（折叠，点击展开），两版内容一致。
+> **图示约定**：每张图提供双版本——上方为看板图（HTML 表格化直观视图），下方为
+> Mermaid 源图（**默认展开**、可点击折叠），两版内容一致。
+>
+> **大屏看板**：另提供深色投屏版 `docs/arch-analyze/dashboard/rustmonitor-dashboard.html`（浏览器 F11 全屏）与逐屏 PNG（`dashboard/slide1~4.png`），已嵌入 §2 / §3.3 / §3.4 / §4.7。
 >
 > 相关文档：`docs/rustmonitor-architecture.md`（总体架构）、
 > `docs/rustmonitor-v2-architecture.md`（v2 演进设计）、
@@ -33,9 +35,96 @@ monitor 自身内存在 L1 的 EPT/NPT 视图里物理上不可见**。L1 绝大
 PIO、绝大多数 MSR、收外部中断）都不产生 VM-Exit，直接命中真实硬件——这是刻意的设计选择，
 不是遗漏（但 MSR/PIO 的"完全不拦截"确实超出了设计意图，构成 v2 要修复的安全缺口，见 §5）。
 
+<table>
+<tr><th colspan="2" align="center" style="background:#7b241c;color:#fff">🎯 拦截面对比：KVM 式 vs RustMonitor 式（看板图）</th></tr>
+<tr>
+<th style="background:#922b21;color:#fff;width:50%">🛑 KVM / Hyper-V：宽拦截面</th>
+<th style="background:#1e8449;color:#fff;width:50%">✅ RustMonitor：窄拦截面</th>
+</tr>
+<tr>
+<td>PIO 拦截 + 设备模型模拟<br/>MMIO 陷入<br/>MSR 按策略拦截/切换<br/>中断全拦截 + 注入<br/>EPT 缺页动态管理 + swap<br/>时钟 / HLT 拦截<br/><i>→ 高频 VM-Exit，设备走 virtio</i></td>
+<td>PIO 直通 · MMIO 恒等映射直通<br/>中断直达 L1 IDT<br/>CR / 异常直通<br/>🛑 CPUID 仿真伪装<br/>🛑 VMCALL / hypercall<br/>🛑 NMI root 态重放<br/>🛑 Enclave 态异常 → AEX<br/><i>→ 极低频 VM-Exit，隔离靠 SLAT 挖洞</i></td>
+</tr>
+</table>
+
+<details open>
+<summary>📐 Mermaid 源图（点击展开 / 折叠）</summary>
+
+```mermaid
+flowchart TB
+    subgraph KVM["KVM / Hyper-V — 宽拦截面（高频 exit）"]
+        direction LR
+        K1["PIO 拦截+模拟"]
+        K2["MMIO 陷入"]
+        K3["MSR 策略拦截"]
+        K4["中断全拦截+注入"]
+        K5["EPT 缺页动态管理"]
+    end
+    subgraph RM["RustMonitor — 窄拦截面（低频 exit）"]
+        direction LR
+        R1["✅ PIO/MMIO/中断/CR/异常 直通"]
+        R2["🛑 CPUID · VMCALL · NMI"]
+        R3["🛑 Enclave 态异常 → AEX"]
+    end
+    ISO["隔离强度来源"]
+    KVM -->|每次访问动态仲裁| ISO
+    RM -->|SLAT 静态挖洞，映射空页| ISO
+```
+
+</details>
+
 ---
 
 ## 2. 全景：激活流程与特权级模型
+
+![RustMonitor 整体架构 · 大屏看板](dashboard/slide1.png)
+
+先用一张分层架构总览图建立全局认知——从上（用户态）到下（硬件信任根），以及信任边界在哪里：
+
+<table>
+<tr><th colspan="4" align="center" style="background:#1a237e;color:#fff">🏗️ 系统整体架构总览（看板图）</th></tr>
+<tr><th style="background:#283593;color:#fff">层级（自上而下）</th><th style="background:#283593;color:#fff">组件</th><th style="background:#283593;color:#fff">特权级 / 信任</th><th style="background:#283593;color:#fff">与 Monitor 的交互</th></tr>
+<tr><td>用户态 · Enclave 世界</td><td>🔒 TEE App（受保护代码/数据）</td><td>ring3 · 非信任</td><td>EENTER/EEXIT（VMCALL User 级 0x8000_0000+）</td></tr>
+<tr><td>用户态 · 普通世界</td><td>SGX 兼容 SDK/运行时、普通 App</td><td>ring3 · 非信任</td><td>syscall 直通；SDK 代发 hypercall / OCALL</td></tr>
+<tr><td>普通内核（L1）</td><td>hyperenclave-driver（ioctl）+ Linux 内核</td><td>ring0 · VMX non-root · 非信任</td><td>ioctl → VMCALL（Supervisor 级）；其余原生跑</td></tr>
+<tr><td colspan="4" align="center" style="background:#ffcdd2">══ 硬件虚拟化边界：VMCALL/VMMCALL → VM-Exit 陷入 Monitor ══</td></tr>
+<tr><td>Monitor（TCB）</td><td>hypercall 分发 · Enclave 管理器 · EPCM/EDMM · 三套页表(GPM/HVM/DMA) · 回收</td><td>VMX root · 最高特权 · <b>信任</b></td><td>—（自身即管理者）</td></tr>
+<tr><td>硬件 / 信任根</td><td>CPU（VMX/SVM、VT-d/AMD-Vi）· TPM（PCR0-7）</td><td>物理 · RoT</td><td>提供隔离原语 + 度量/证明根</td></tr>
+</table>
+
+<details open>
+<summary>📐 Mermaid 源图（点击展开 / 折叠）</summary>
+
+```mermaid
+graph TB
+    subgraph U["用户态 ring3（非信任）"]
+        APP["🔒 TEE App<br/>Enclave 世界"]
+        SDK["SGX SDK/运行时<br/>普通 App"]
+    end
+    subgraph K["普通内核 L1（ring0, VMX non-root, 非信任）"]
+        DRV["hyperenclave-driver (ioctl)"]
+        LNX["Linux 内核"]
+    end
+    subgraph M["Monitor（VMX root, TCB, 信任）"]
+        HC["Hypercall 分发 + 校验"]
+        EM["Enclave 管理器 / EPCM / EDMM / 回收"]
+        PT["三套页表 GPM·HVM·DMA"]
+    end
+    subgraph HW["硬件 / 信任根"]
+        CPU["CPU VMX/SVM · VT-d/AMD-Vi"]
+        TPM["TPM PCR0-7"]
+    end
+    APP -->|"EENTER/EEXIT VMCALL(User)"| HC
+    SDK -->|"syscall 直通(不经 Monitor)"| LNX
+    SDK -->|"OCALL/代发 hypercall"| DRV
+    DRV -->|"ioctl→VMCALL(Supervisor)"| HC
+    LNX -.->|"少数 VM-Exit"| HC
+    HC --> EM --> PT
+    PT -->|"SLAT 隔离原语"| CPU
+    EM -->|"度量/证明"| TPM
+```
+
+</details>
 
 ### 2.1 从 Linux 裸机到 "Linux 成为 L1 guest"
 
@@ -53,7 +142,7 @@ IOMMU 单元、TPM MMIO）与 ELF 头信息（`HvHeader`）布置在预留物理
 <tr><td align="center">5️⃣</td><td>每个 CPU</td><td><code>activate_vmm</code>：栈重定位到 LOCAL_PER_CPU_BASE 私有映射 → <code>vmlaunch</code>/<code>vmrun</code></td><td>💥 Linux 在"毫无知觉"中变为 guest：RIP/RSP/CR3 原样恢复，从驱动调用的下一条指令继续执行</td></tr>
 </table>
 
-<details>
+<details open>
 <summary>📐 Mermaid 源图（点击展开 / 折叠）</summary>
 
 ```mermaid
@@ -104,7 +193,7 @@ sequenceDiagram
 <tr><td align="center" style="background:#196f3d;color:#fff;padding:8px"><b>Enclave（S-world）</b>（仍是 L1 non-root，但换了页表视图）<br/>GU-Enclave：ring 3 用户态可信应用，EFER.SCE 关闭（禁 syscall）<br/>🛡️ 独立 NPT/GPT 视图；任何异常/中断 → AEX 弹回普通世界</td></tr>
 </table>
 
-<details>
+<details open>
 <summary>📐 Mermaid 源图（点击展开 / 折叠）</summary>
 
 ```mermaid
@@ -160,7 +249,7 @@ RustMonitor 的"VM 管理"退化为极简形态——没有 `struct kvm` 式的 
 <tr><td align="center"><code>EnclaveRunning</code></td><td>S-world 运行中，仅受理 User 级 Enclave hypercall；异常/中断 → AEX</td><td>→ <code>HvEnabled</code>：EEXIT / AEX / fault</td></tr>
 </table>
 
-<details>
+<details open>
 <summary>📐 Mermaid 源图（点击展开 / 折叠）</summary>
 
 ```mermaid
@@ -196,7 +285,7 @@ stateDiagram-v2
 <tr><td>TRIPLE_FAULT / SHUTDOWN</td><td colspan="2" align="center">记录日志并注入 #GP（不关机、不 panic）</td><td>intel/vmexit.rs:182 / amd/vmexit.rs:200</td></tr>
 </table>
 
-<details>
+<details open>
 <summary>📐 Mermaid 源图（点击展开 / 折叠）</summary>
 
 ```mermaid
@@ -221,6 +310,8 @@ flowchart TB
 
 ### 3.3 Hypercall：L1 与 monitor 的唯一"上行控制通道"
 
+![Hypercall 调用链 · 大屏看板](dashboard/slide2.png)
+
 L1（驱动/enclave 运行时）通过 `VMCALL`（Intel）/`VMMCALL`（AMD）主动陷入 monitor，
 参数经 RAX（code）、RDI、RSI 传递。分发在 `src/hypercall/mod.rs`：
 
@@ -237,9 +328,114 @@ L1（驱动/enclave 运行时）通过 `VMCALL`（Intel）/`VMMCALL`（AMD）主
 - **共享内存合法性**：Enclave 访问普通世界内存必须经 `SharedMemoryAdd` 注册的区间，
   由 `Cell::normal_world_mem_region`（区间树）校验 GPA 落在合法 normal world RAM 内。
 
+<table>
+<tr><th colspan="4" align="center" style="background:#4a235a;color:#fff">📞 Hypercall 分发与校验流水线（看板图）</th></tr>
+<tr><th style="background:#6c3483;color:#fff">阶段</th><th style="background:#6c3483;color:#fff">检查 / 动作</th><th style="background:#6c3483;color:#fff">失败后果</th><th style="background:#6c3483;color:#fff">代码</th></tr>
+<tr><td align="center">1️⃣ 解码</td><td>RAX=code 转 <code>HyperCallCode</code> 枚举</td><td>未知 code → 忽略（返回 None）</td><td>mod.rs:189</td></tr>
+<tr><td align="center">2️⃣ 特权级校验</td><td>code bit31 决定的级别 == 发起方 CPL？</td><td>不符 → 注入 #UD</td><td>mod.rs:197</td></tr>
+<tr><td align="center">3️⃣ 状态校验</td><td><code>validate_state</code>：code 是否允许当前 <code>CpuState</code></td><td>不符 → 注入 #UD</td><td>mod.rs:206</td></tr>
+<tr><td align="center">4️⃣ 参数翻译</td><td>GVA 经 L1 CR3 页表 → GPA（marshalling）</td><td>地址不可信，绝不直接解引用</td><td><code>as_guest_ptr_ns</code></td></tr>
+<tr><td align="center">5️⃣ 执行 handler</td><td>40+ 分支：Enclave 生命周期 / 共享内存 / TPM / 证明</td><td>HvError→#GP；EnclaveError→返回码</td><td>mod.rs:212</td></tr>
+<tr><td align="center">6️⃣ 回写结果</td><td><code>set_return_val</code>(RAX) 或注入异常，<code>advance_rip</code></td><td>—</td><td>vmm.rs:147</td></tr>
+</table>
+
+<details open>
+<summary>📐 Mermaid 源图（点击展开 / 折叠）</summary>
+
+```mermaid
+flowchart TB
+    A["VMCALL/VMMCALL<br/>RAX=code, RDI/RSI=args"] --> B{"code 可识别?"}
+    B -->|否| Z1["忽略, 返回 None"]
+    B -->|是| C{"特权级匹配?<br/>bit31 vs CPL"}
+    C -->|否| Z2["注入 #UD"]
+    C -->|是| D{"validate_state<br/>CpuState 合法?"}
+    D -->|否| Z2
+    D -->|是| E["参数 GVA→GPA<br/>经 L1 页表翻译"]
+    E --> F["执行 handler (40+ 分支)"]
+    F --> G{"结果"}
+    G -->|Ok / EnclaveError| H["set_return_val → RAX"]
+    G -->|HvError| Z3["注入 #GP"]
+    H --> I["advance_rip, 返回 L1"]
+```
+
+</details>
+
+上面是 monitor 内部的分发流水线；下图用**时序图**给出一次 hypercall 跨越 non-root ⇄ root 边界的完整往返（从 L1 发起到读回返回值）：
+
+<table>
+<tr><th colspan="4" align="center" style="background:#4a235a;color:#fff">📞 Hypercall 端到端调用时序（看板图）</th></tr>
+<tr><th style="background:#6c3483;color:#fff">#</th><th style="background:#6c3483;color:#fff">阶段</th><th style="background:#6c3483;color:#fff">动作</th><th style="background:#6c3483;color:#fff">所处世界</th></tr>
+<tr><td align="center">1️⃣</td><td>发起</td><td>App/驱动设 RAX=code、RDI/RSI=参数，执行 <code>VMCALL</code>(Intel)/<code>VMMCALL</code>(AMD)</td><td>VMX non-root</td></tr>
+<tr><td align="center">2️⃣</td><td>陷入</td><td>硬件 VM-Exit → <code>arch_entry</code> 切到 Monitor 私有栈 → <code>vmexit_handler</code></td><td>→ VMX root</td></tr>
+<tr><td align="center">3️⃣</td><td>识别</td><td><code>handle_hypercall</code> → <code>HyperCall::from_regs</code>（取 RAX=code、guest CR3=gpt）</td><td>Monitor</td></tr>
+<tr><td align="center">4️⃣</td><td>校验</td><td><code>privilege_level()</code>（CS.DPL vs bit31）→ <code>validate_state()</code>（CpuState 匹配）</td><td>Monitor</td></tr>
+<tr><td align="center">5️⃣</td><td>分发</td><td><code>match code</code> → handler（如 <code>enclave_enter</code>）；指针参数经 L1 页表翻译后执行</td><td>Monitor</td></tr>
+<tr><td align="center">6️⃣</td><td>返回</td><td><code>set_return_val</code>(RAX) 或注入异常 → <code>advance_rip</code> 跳过 VMCALL → VMEntry</td><td>→ VMX non-root</td></tr>
+<tr><td align="center">7️⃣</td><td>续跑</td><td>L1 从 VMCALL 下一条指令继续，读 RAX 得返回值/错误码</td><td>VMX non-root</td></tr>
+</table>
+
+<details open>
+<summary>📐 Mermaid 源图（点击展开 / 折叠）</summary>
+
+```mermaid
+sequenceDiagram
+    participant G as L1(App/驱动)
+    participant HW as CPU 硬件
+    participant M as Monitor(VMX root)
+    G->>HW: RAX=code, RDI/RSI=args; VMCALL/VMMCALL
+    HW->>M: VM-Exit（陷入）
+    Note over M: arch_entry 切私有栈<br/>vmexit_handler
+    M->>M: HyperCall::from_regs（RAX=code, CR3=gpt）
+    M->>M: privilege_level()（CS.DPL vs bit31）
+    M->>M: validate_state()（CpuState）
+    M->>M: match code → handler（参数 GVA→GPA）
+    M->>M: set_return_val(RAX) / 注入异常
+    M->>HW: advance_rip → VMEntry
+    HW->>G: 从 VMCALL 下一条续跑，读 RAX
+```
+
+</details>
+
 **对 VM 的"管理"因此可以总结为**：monitor 不管理 VM 的资源配额与调度（Linux 自己管），
 只管理 VM 的**安全语义**——谁能进入 S-world、S-world 能看到哪些物理页、L1 与 S-world
 之间的每一次跨越（hypercall/AEX/EEXIT）都经过强制校验。
+
+### 3.4 Enclave 世界切换：EENTER / EEXIT / ERESUME / AEX
+
+![Enclave 世界切换 · 大屏看板](dashboard/slide4.png)
+
+Enclave 与普通世界**共享同一个 vCPU**（同一个 VMCS/VMCB），所谓"进入/退出"不是 VM 切换，
+而是 monitor 在一次 hypercall（或一次被动 AEX）里**原子替换一组视图寄存器 + 保存/恢复两套线程状态**
+（`EnclaveThread::enter/exit/resume/aex`，`src/enclave/thread.rs`）。四条转换路径：
+
+<table>
+<tr><th colspan="5" align="center" style="background:#0e6251;color:#fff">🔀 Enclave 世界切换：四条转换路径（看板图）</th></tr>
+<tr><th style="background:#148f77;color:#fff">转换</th><th style="background:#148f77;color:#fff">触发（hypercall code）</th><th style="background:#148f77;color:#fff">前置 CpuState</th><th style="background:#148f77;color:#fff">关键动作（状态保存/恢复）</th><th style="background:#148f77;color:#fff">后置 CpuState</th></tr>
+<tr><td align="center"><b>EENTER</b></td><td>EnclaveEnter <code>0x8000_0000</code><br/>RBX=TCS, RCX=AEP</td><td align="center">HvEnabled</td><td>存 normal_world_state（RSP/RBP → SSA.ursp/urbp）；载 enclave 态：RIP=base+oentry、切 NPT+GPT root、IDTR=0、<b>EFER 清 SCE</b>、按 feature 设 RFLAGS.IF</td><td align="center">EnclaveRunning</td></tr>
+<tr><td align="center"><b>EEXIT</b></td><td>EnclaveExit <code>0x8000_0001</code>（主动）</td><td align="center">EnclaveRunning</td><td>恢复 normal_world_state（页表/IDT/EFER），RCX=AEP，is_active=false</td><td align="center">HvEnabled</td></tr>
+<tr><td align="center"><b>AEX</b></td><td>Enclave 态任何异常/中断（<b>被动</b>，非 hypercall）</td><td align="center">EnclaveRunning</td><td>enclave_aex：全部寄存器+XSAVE 存入 SSA.gpr；恢复普通世界；擦除寄存器；置 RAX=EnclaveResume、RBX=TCS、RCX=AEP、RSP/RBP=ursp/urbp；cssa+=1</td><td align="center">HvEnabled</td></tr>
+<tr><td align="center"><b>ERESUME</b></td><td>EnclaveResume <code>0x8000_0005</code>（AEP 处理完返回）</td><td align="center">HvEnabled</td><td>从 SSA(cssa-1) 恢复寄存器+XSAVE，校验 xfrm；若 SHARED_MEM_FETCH 则同步共享内存映射；cssa-=1</td><td align="center">EnclaveRunning</td></tr>
+</table>
+
+<details open>
+<summary>📐 Mermaid 源图（点击展开 / 折叠）</summary>
+
+```mermaid
+flowchart LR
+    NW["普通世界<br/>CpuState=HvEnabled<br/>(ring3 App / ring0 内核)"]
+    SW["Enclave S-world<br/>CpuState=EnclaveRunning<br/>(ring3, EFER.SCE=0, 全异常拦截)"]
+    NW -->|"EENTER 0x8000_0000<br/>存 normal_state·载 enclave 态<br/>切 NPT+GPT·IDTR=0·清 SCE"| SW
+    SW -->|"EEXIT 0x8000_0001（主动）<br/>恢复 normal_state·RCX=AEP"| NW
+    SW -->|"AEX 异常/中断（被动）<br/>寄存器+XSAVE→SSA·cssa+=1<br/>置 RAX=EnclaveResume"| NW
+    NW -->|"ERESUME 0x8000_0005<br/>从 SSA 恢复·cssa-=1"| SW
+```
+
+</details>
+
+> **关键点**：EENTER/ERESUME 只能在 HvEnabled 发起，EEXIT/EACCEPT 类只能在 EnclaveRunning 发起
+> （`validate_state` 强制，见 §3.3）——这正是把 SGX 的 ring 转换语义映射到 hypercall 状态机。
+> AEX 是唯一**被动**转换：它把现场完整存进 SSA 后，把寄存器摆成"刚从 EnclaveEnter hypercall 返回"的样子
+> （RAX=EnclaveResume、RCX=AEP），于是普通世界的 AEP（异步事件处理点，通常是信号处理路径）接管。
 
 ---
 
@@ -265,7 +461,7 @@ L1（驱动/enclave 运行时）通过 `VMCALL`（Intel）/`VMMCALL`（AMD）主
 <tr><td>调试寄存器 / XSETBV / MONITOR / PAUSE</td><td colspan="2" align="center">均不拦截</td><td>直通</td></tr>
 </table>
 
-<details>
+<details open>
 <summary>📐 Mermaid 源图（点击展开 / 折叠）</summary>
 
 ```mermaid
@@ -330,6 +526,39 @@ VMCS EFER guest/host mask 约束的路径此处未启用）、写 MTRR/PAT（可
 "MSR 三层虚拟化（拦截层+策略层+VMCS MSR load/store 加速层）"要修复的核心缺口，
 详见 `docs/rustmonitor-v2-implementation-design.md` PR2。
 
+<table>
+<tr><th colspan="2" align="center" style="background:#7e5109;color:#fff">🐞 MSR 拦截：设计意图 vs 实际行为（看板图）</th></tr>
+<tr>
+<th style="background:#1e8449;color:#fff;width:50%">✅ 设计意图</th>
+<th style="background:#922b21;color:#fff;width:50%">❌ 实际行为（缺陷）</th>
+</tr>
+<tr>
+<td>位图登记敏感 MSR：<br/>APIC_BASE·MTRR·PAT·EFER<br/>STAR/LSTAR/CSTAR·x2APIC·PERF<br/>→ 读写触发 VM-Exit<br/>→ <code>handle_msr_read/write</code> 仿真</td>
+<td><code>mask()</code> 用 <code>&amp;= 1&lt;&lt;bit</code><br/>位图页零初始化：<code>0 &amp;= x ≡ 0</code><br/>→ 拦截位<b>从未置起</b><br/>→ 全 MSR 直通，handler 成死代码<br/>（正确应为 <code>|= 1&lt;&lt;bit</code>）</td>
+</tr>
+</table>
+
+<details open>
+<summary>📐 Mermaid 源图（点击展开 / 折叠）</summary>
+
+```mermaid
+flowchart TB
+    subgraph INTEND["设计意图"]
+        I1["位图登记敏感 MSR"] --> I2["敏感 MSR 读写 → VM-Exit"]
+        I2 --> I3["handle_msr_read/write 仿真"]
+    end
+    subgraph BUG["实际（缺陷）"]
+        B1["AlignedPage = 全 0"] --> B2["mask(): bitmap 按位与 (1 shl bit)"]
+        B2 --> B3["0 与任何值 = 0 → 位图恒全 0"]
+        B3 --> B4["不拦截任何 MSR → 全直通"]
+        B4 --> B5["handler 不可达（死代码）"]
+    end
+    FIX["修复: 改用 按位或 (1 shl bit)<br/>+ AMD 配置 MSRPM<br/>+ v2 fail-closed 策略表"]
+    BUG -.-> FIX
+```
+
+</details>
+
 ### 4.3 内存：三套页表 + 静态分区 + SLAT 挖洞
 
 `Cell::new_root()`（`src/cell.rs`）在激活早期一次性构建三套页表，此后**普通世界的
@@ -343,7 +572,7 @@ GPM 视图终生不变**（无 demand paging、无 swap、无 dirty tracking）�
 <tr><td><b>DMA</b><br/>(IOMMU 页表)</td><td>设备 DMA 地址 → HPA</td><td>所有 IOMMU 单元（init 时 <code>set_io_page_table</code> 下发）</td><td>仅映射 DMA 合法区间（驱动声明的 DMA 区 + RMRR）；monitor 内存与 EPC <b>不在其中</b> → 恶意设备/驱动无法经 DMA 读 Enclave（HyperGPU 场景下即 GPU DMA 隔离）</td></tr>
 </table>
 
-<details>
+<details open>
 <summary>📐 Mermaid 源图（点击展开 / 折叠）</summary>
 
 ```mermaid
@@ -403,6 +632,36 @@ marshalling 区域。运行时 Enclave 对 EPC 页的访问若尚未建立映射
   **重注入** L1（`Vmcs::inject_interrupt`），使 Linux 的中断处理不丢失事件——精确复刻
   SGX 的 AEX 语义，这是"用 hypervisor 软件实现 SGX 兼容层"的核心技巧。
 
+<table>
+<tr><th colspan="3" align="center" style="background:#1b4f72;color:#fff">⚡ 中断/异常投递：普通态 vs Enclave 态（看板图）</th></tr>
+<tr><th style="background:#21618c;color:#fff">事件</th><th style="background:#21618c;color:#fff">普通世界（HvEnabled）</th><th style="background:#21618c;color:#fff">Enclave 态（EnclaveRunning）</th></tr>
+<tr><td>外部中断</td><td>直达 L1 IDT，<b>零 exit</b>（未开 INTR_EXITING）</td><td>feature 开启时 exit → AEX → 保存现场到 SSA → 重注入 L1</td></tr>
+<tr><td>异常（#PF/#GP…）</td><td>直达 L1 IDT（bitmap=0）</td><td>全拦截（bitmap=0xFFFF_FFFF）→ fixup_exception → AEX 或注入</td></tr>
+<tr><td>NMI</td><td>exit → root 态重放（Intel int 2 / AMD stgi 窗口）</td><td>AEX</td></tr>
+</table>
+
+<details open>
+<summary>📐 Mermaid 源图（点击展开 / 折叠）</summary>
+
+```mermaid
+sequenceDiagram
+    participant HW as 硬件(中断/异常)
+    participant MON as RustMonitor
+    participant ENC as Enclave(S-world)
+    participant L1 as L1 普通世界
+
+    Note over ENC: Enclave 运行中<br/>EXCEPTION_BITMAP=0xFFFFFFFF
+    HW->>MON: 异步事件 → VM-Exit
+    MON->>ENC: 保存现场到 SSA (enclave_aex)
+    MON->>MON: 恢复普通世界 NPT/GPT + IDT + EFER
+    MON->>L1: inject_interrupt 重注入事件
+    Note over L1: Linux 中断处理正常执行<br/>(事件不丢失)
+    L1-->>MON: 处理完, ERESUME hypercall
+    MON->>ENC: 恢复 SSA 现场, 回到 S-world
+```
+
+</details>
+
 ### 4.5 设备与 DMA：IOMMU 接管，设备本体直通
 
 - 所有 PCI/平台设备**直通**给 L1：MMIO 在 GPM 中恒等映射，驱动正常工作，无 exit。
@@ -413,14 +672,112 @@ marshalling 区域。运行时 Enclave 对 EPC 页的访问若尚未建立映射
 - monitor 自己需要访问的硬件（TPM MMIO、IOMMU 寄存器）映射进 HVM 直接操作，不经过
   任何虚拟化——monitor 是这些设备的唯一主人。
 
+<table>
+<tr><th colspan="3" align="center" style="background:#145a32;color:#fff">🔌 DMA 隔离：设备可达域裁剪（看板图）</th></tr>
+<tr><th style="background:#1e8449;color:#fff">主体</th><th style="background:#1e8449;color:#fff">路径</th><th style="background:#1e8449;color:#fff">可见内存</th></tr>
+<tr><td>CPU（L1）</td><td>GPM (EPT/NPT)</td><td>系统 RAM ✅ · monitor 内存/EPC ❌（空页）</td></tr>
+<tr><td>设备 DMA</td><td>IOMMU 页表 (dma_regions)</td><td>DMA 区+RMRR ✅ · monitor 内存/EPC ❌（未映射）</td></tr>
+<tr><td>monitor</td><td>HVM (自身 CR3)</td><td>全部（含 EPC 加密视图、TPM/IOMMU MMIO）</td></tr>
+<tr><td colspan="3" align="center">⬇️ 三条路径对 monitor 内存/EPC 一致不可达 → 闭合"驱动令 GPU/NIC DMA 读 Enclave"旁路 ⬇️</td></tr>
+</table>
+
+<details open>
+<summary>📐 Mermaid 源图（点击展开 / 折叠）</summary>
+
+```mermaid
+flowchart TB
+    subgraph VIS["✅ 可见"]
+        RAM["系统 RAM / DMA 区 / RMRR"]
+    end
+    subgraph HID["❌ 不可达（结构性隐藏）"]
+        EPC["EPC (Enclave 页)"]
+        MONM["monitor 自身内存"]
+    end
+    CPU["CPU (L1)"] -->|GPM EPT/NPT| RAM
+    CPU -.->|命中空页| HID
+    DEV["设备 DMA"] -->|IOMMU dma_regions| RAM
+    DEV -.->|未映射| HID
+    MON["RustMonitor"] -->|HVM| RAM
+    MON -->|HVM 加密视图| EPC
+```
+
+</details>
+
 ### 4.6 monitor 自身的硬件资源
 
 monitor 运行所需资源全部来自驱动预留的连续物理内存（`HvSystemConfig.hypervisor_memory`，
 GRUB `memmap=` 参数从 Linux 手里抢出来的区域）：代码/数据/堆、每 CPU 的 PerCpu 结构
-（含 8K 级私有栈）、VMXON/VMCS/VMCB 区（各 4K，`VmxRegion`）、MSR bitmap、三套页表。
+（含 512KB 私有栈，`HV_STACK_SIZE`）、VMXON/VMCS/VMCB 区（各 4K，`VmxRegion`）、MSR bitmap、三套页表。
 帧分配在 `memory::init` 建立，堆基于预留区。**monitor 不用 Linux 的任何分配器、
 不触发任何 L1 回调**——自包含是 TCB 的基本要求。日志走串口 16550（MMIO/PIO 直通区）
 与 hyperbox 共享内存（`logging::hhbox_init`，供 L1 dmesg 侧读取）。
+
+<table>
+<tr><th colspan="3" align="center" style="background:#7e5109;color:#fff">🧱 monitor 虚拟地址空间布局（看板图）</th></tr>
+<tr><th style="background:#9c640c;color:#fff">区域</th><th style="background:#9c640c;color:#fff">地址</th><th style="background:#9c640c;color:#fff">内容</th></tr>
+<tr><td><code>HV_BASE</code></td><td><code>0xffff_ff00_0000_0000</code></td><td>core（代码/数据）+ max_cpus×PER_CPU_SIZE + 堆/配置</td></tr>
+<tr><td><code>TEMP_MAPPING_BASE</code></td><td><code>0xffff_f000_0000_0000</code></td><td>16 页临时映射窗口</td></tr>
+<tr><td><code>LOCAL_PER_CPU_BASE</code></td><td>TEMP + 16×4K</td><td>本 CPU PerCpu 私有自映射（activate 后栈重定位于此）</td></tr>
+<tr><td><code>PerCpu.stack</code></td><td>结构内</td><td>每 CPU 512KB 私有栈（HV_STACK_SIZE）</td></tr>
+</table>
+
+<details open>
+<summary>📐 Mermaid 源图（点击展开 / 折叠）</summary>
+
+```mermaid
+flowchart TB
+    RES["驱动预留连续物理内存<br/>(GRUB memmap= 抢占)"] --> HV
+    subgraph HV["monitor 虚拟地址空间"]
+        A["HV_BASE 0xffff_ff00_0000_0000<br/>core 代码/数据 · PerCpu 数组 · 堆"]
+        B["TEMP_MAPPING_BASE 0xffff_f000_0000_0000<br/>16 页临时映射"]
+        C["LOCAL_PER_CPU_BASE<br/>本 CPU PerCpu 私有自映射"]
+    end
+    A --- D["含: VMXON/VMCS/VMCB 区 · MSR bitmap<br/>三套页表 · 512KB/CPU 栈"]
+```
+
+</details>
+
+### 4.7 系统调用路径：普通世界直通，Enclave 内禁用
+
+![系统调用路径 · 大屏看板](dashboard/slide3.png)
+
+一个常见疑问：L1 降级后，App 的 `syscall` 会不会 VM-Exit 到 monitor？答案分三种情形——
+这也是理解"Enclave 为何不能直接做 I/O"的关键：
+
+<table>
+<tr><th colspan="4" align="center" style="background:#7b241c;color:#fff">📲 系统调用路径：三种情形（看板图）</th></tr>
+<tr><th style="background:#922b21;color:#fff">场景</th><th style="background:#922b21;color:#fff">路径</th><th style="background:#922b21;color:#fff">是否 VM-Exit</th><th style="background:#922b21;color:#fff">结果</th></tr>
+<tr><td>普通世界 App <code>syscall</code></td><td>SYSCALL → LSTAR 入口 → Linux 内核</td><td align="center">❌ 否</td><td>EFER.SCE=1，且 VMX 不拦截 SYSCALL 指令 → Linux 原生全速处理，monitor 完全不参与</td></tr>
+<tr><td>Enclave 内直接 <code>SYSCALL</code></td><td>EENTER 已清 EFER.SCE → SYSCALL 触发 #UD → 全异常拦截 → AEX</td><td align="center">✅ 是</td><td>现场存 SSA，向 AEP 注入 #UD，弹回普通世界 → <b>Enclave 无法直接 syscall</b>（隔离设计）</td></tr>
+<tr><td>Enclave 正确 I/O（OCALL）</td><td>EEXIT(<code>0x8000_0001</code>) → 非信任运行时 → 运行时在普通世界 syscall → 数据经 marshalling/共享内存 → EENTER/ERESUME 回 Enclave</td><td align="center">✅（EEXIT/ENTER 各一次）</td><td>受控出站：syscall 由非信任侧代做，数据跨界经 <code>SharedMemoryAdd</code> 白名单校验的共享内存</td></tr>
+</table>
+
+<details open>
+<summary>📐 Mermaid 源图（点击展开 / 折叠）</summary>
+
+```mermaid
+flowchart TB
+    START{"谁发起 syscall?"}
+    START -->|普通世界 App| NW["SYSCALL → LSTAR → Linux 内核<br/>EFER.SCE=1, VMX 不拦截 SYSCALL"]
+    NW --> NWR["✅ 零 VM-Exit，原生全速"]
+    START -->|Enclave 内代码| SCE["EENTER 已清 EFER.SCE"]
+    SCE --> UD["SYSCALL → #UD"]
+    UD --> AEX["全异常拦截 → AEX<br/>存 SSA, 向 AEP 注入 #UD"]
+    AEX --> BLOCK["🛑 弹回普通世界：禁止直接 syscall"]
+    START -->|Enclave 需要 I/O| OCALL["EEXIT 0x8000_0001"]
+    OCALL --> RT["非信任运行时(普通世界)"]
+    RT --> SYS["运行时执行真正 syscall"]
+    SYS --> MARSH["数据经 marshalling/共享内存<br/>(SharedMemoryAdd 白名单校验)"]
+    MARSH --> REENTER["EENTER/ERESUME 回 Enclave"]
+```
+
+</details>
+
+> **专家点评**：这是 GU-Enclave 模型的核心约束——`enclave_enter`/`enclave_resume` 显式从 EFER 减去
+> `SYSTEM_CALL_EXTENSIONS`（`arch/x86_64/enclave.rs:213/318`，注释 "Disable syscalls in efer"）。
+> 由于 SCE=0 时 `SYSCALL` 在硬件层触发 #UD，而 Enclave 态 `EXCEPTION_BITMAP=0xFFFF_FFFF` 全拦截，
+> 任何尝试都被转为 AEX。这迫使 Enclave 的所有 I/O 必须经**显式 EEXIT + 非信任运行时代理 + 共享内存编组**，
+> 从而把"Enclave 与内核的直接接口"收窄为"Enclave 与运行时经常校验共享内存的间接接口"——攻击面大幅缩小。
 
 ---
 
@@ -455,6 +812,22 @@ GRUB `memmap=` 参数从 Linux 手里抢出来的区域）：代码/数据/堆�
 <tr><td><b>Hyper-V VBS</b></td><td>VSM：root partition + 嵌套可信域</td><td>MBEC/shadow stack/MSR 仿真/DMA 保护全拦截，fail-closed</td><td>VBS 是 RustMonitor v2 的对标物：v1 缺的 MSR/CPUID/PIO/电源仲裁正是 VBS 具备的"OS–硬件隔离"能力面</td></tr>
 </table>
 
+<details open>
+<summary>📐 Mermaid 源图（点击展开 / 折叠）</summary>
+
+```mermaid
+flowchart LR
+    KVM2["KVM<br/>多VM·全拦截·设备模型"]
+    JH["Jailhouse<br/>静态分区·整机 cell 划分"]
+    RM2["RustMonitor v1<br/>单 root cell·窄拦截·SLAT 挖洞"]
+    HV2["Hyper-V VBS<br/>OS-硬件全隔离·fail-closed"]
+    KVM2 -.->|"忠实虚拟机器（目标不同）"| RM2
+    JH -.->|"激活模型同源"| RM2
+    RM2 -.->|"v2 对标隔离能力面"| HV2
+```
+
+</details>
+
 ### 6.2 点评
 
 1. **"结构性隔离优于动态仲裁"是 v1 最漂亮的设计决策**。Enclave 内存的机密性/完整性
@@ -487,6 +860,7 @@ GRUB `memmap=` 参数从 Linux 手里抢出来的区域）：代码/数据/堆�
 | CPUID 伪装 / MSR stub | `src/arch/x86_64/vmm.rs:85-145` |
 | MSR bitmap（含缺陷） | `src/arch/x86_64/intel/structs.rs:50-71`（`mask()` 的 `&=`） |
 | Enclave 视图切换 | `src/arch/x86_64/intel/enclave.rs`、`amd/enclave.rs`（`store_enclave_thread_state`） |
+| Enclave 世界切换 / syscall 禁用 | `src/enclave/thread.rs`（`enter/exit/resume/aex`）、`src/arch/x86_64/enclave.rs:194-357`（`enclave_enter/exit/aex/resume`，EFER 清 SCE 见 `:213`/`:318`） |
 | 三套页表构建 | `src/cell.rs`（`Cell::new_root`） |
 | IOMMU 接管 | `src/iommu/mod.rs`、`intel/vtd.rs`、`amd/iommu.rs` |
 | Hypercall 分发 | `src/hypercall/mod.rs`（`HyperCallCode`、`validate_state`、`hypercall`） |
