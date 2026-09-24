@@ -44,6 +44,8 @@ pub struct Vcpu {
     host_save_area: Frame,
     /// MSR permission map backing the MSR_PROT interception.
     msrpm: MsrPermissionMap,
+    /// I/O permission map backing the IOIO_PROT interception.
+    iopm: IoPermissionMap,
     /// Virtual machine control block.
     pub(super) vmcb: Vmcb,
 }
@@ -104,6 +106,36 @@ impl MsrPermissionMap {
     }
 }
 
+/// AMD SVM I/O permission map (SVM Ref. Manual §2 "IOIO Intercepts"):
+/// 12 KiB contiguous, 4-KiB aligned — a linear array of 64K+3 bits where
+/// bit n traps port n. IN/OUT and string INS/OUTS are intercepted alike,
+/// and a multi-byte access traps if any covered port bit is set, so
+/// encoding the trapped ports is sufficient. The three trailing bits are
+/// the global string-I/O address-size controls; they stay clear so string
+/// I/O follows the port bits only, exactly like the Intel I/O bitmaps.
+struct IoPermissionMap {
+    /// Three pages (12 KiB): two full pages of port bits plus the page
+    /// holding the three string-I/O address-size control bits.
+    frame: Frame,
+}
+
+/// Encode the shared PIO policy table into a zeroed I/O permission map.
+fn apply_io_policy(map: &mut [u8]) {
+    debug_assert!(map.len() >= 3 * 4096);
+    crate::arch::pio::foreach_trapped_port(|port| {
+        map[port as usize / 8] |= 1 << (port % 8);
+    });
+}
+
+impl IoPermissionMap {
+    fn new() -> HvResult<Self> {
+        let mut frame = Frame::new_contiguous(3, 12)?;
+        frame.zero();
+        apply_io_policy(frame.as_slice_mut());
+        Ok(Self { frame })
+    }
+}
+
 impl Vcpu {
     pub fn new(linux: &LinuxContext, cell: &Cell) -> HvResult<Self> {
         super::check_hypervisor_feature()?;
@@ -154,6 +186,7 @@ impl Vcpu {
         }
         let host_save_area = Frame::new()?;
         let msrpm = MsrPermissionMap::new()?;
+        let iopm = IoPermissionMap::new()?;
         unsafe { Efer::write(efer | EferFlags::SECURE_VIRTUAL_MACHINE_ENABLE) };
         unsafe { Msr::VM_HSAVE_PA.write(host_save_area.start_paddr() as _) };
         info!("successed to turn on SVM.");
@@ -168,6 +201,7 @@ impl Vcpu {
             guest_regs: Default::default(),
             host_save_area,
             msrpm,
+            iopm,
             host_stack_top: PerCpu::from_local_base().stack_top() as _,
             vmcb: Default::default(),
         };
@@ -319,6 +353,9 @@ impl Vcpu {
         // The base must be 4-KiB aligned (a VMRUN validity requirement
         // whenever the MSR_PROT interception is active).
         vmcb.msrpm_base_pa = self.msrpm.frame.start_paddr() as _;
+        // I/O permission map base, likewise 4-KiB aligned (a VMRUN validity
+        // requirement whenever the IOIO_PROT interception is active).
+        vmcb.iopm_base_pa = self.iopm.frame.start_paddr() as _;
 
         self.vmcb.set_intercept(SvmIntercept::NMI, true);
         self.vmcb.set_intercept(SvmIntercept::CPUID, true);
@@ -331,6 +368,7 @@ impl Vcpu {
         self.vmcb.set_intercept(SvmIntercept::CLGI, true);
         self.vmcb.set_intercept(SvmIntercept::SKINIT, true);
         self.vmcb.set_intercept(SvmIntercept::MSR_PROT, true);
+        self.vmcb.set_intercept(SvmIntercept::IOIO_PROT, true);
     }
 
     fn load_vmcb_guest(&self, linux: &mut LinuxContext) {
@@ -409,9 +447,10 @@ impl VcpuAccessGuestState for Vcpu {
         match cr_idx {
             // Mask off architecturally reserved bits and NW, as we don't want
             // write-through caches while in root mode (G11).
-            0 => self.vmcb.save.cr0 = val
-                & !super::super::CR0_RESERVED
-                & !Cr0Flags::NOT_WRITE_THROUGH.bits(),
+            0 => {
+                self.vmcb.save.cr0 =
+                    val & !super::super::CR0_RESERVED & !Cr0Flags::NOT_WRITE_THROUGH.bits()
+            }
             3 => self.vmcb.save.cr3 = val,
             // Mask off architecturally reserved bits (G11).
             4 => self.vmcb.save.cr4 = val & !super::super::CR4_RESERVED,
@@ -525,16 +564,37 @@ mod tests {
         assert!(!intercepted(0x6e0, true)); // TSC_DEADLINE
         assert!(!intercepted(0x808, false)); // x2APIC ICR
         assert!(!intercepted(0xc001_0015, true)); // AMD HWCR
-        // Non-passthrough actions: both directions intercepted.
+                                                  // Non-passthrough actions: both directions intercepted.
         assert!(intercepted(0x174, false) && intercepted(0x174, true)); // SYSENTER
         assert!(intercepted(0xc000_0080, false)); // EFER
         assert!(intercepted(0xc000_0102, false)); // KERNEL_GS_BASE
         assert!(intercepted(0x480, false)); // VMX capability zone: read hidden
-        // Read-only platform MSRs: read passes, write denied.
+                                            // Read-only platform MSRs: read passes, write denied.
         assert!(!intercepted(0xfe, false) && intercepted(0xfe, true)); // MTRRCAP
-        // MSRs outside the three ranges cannot be trapped at all.
+                                                                       // MSRs outside the three ranges cannot be trapped at all.
         assert!(permission_bit(0x2000, false).is_none());
         assert!(permission_bit(0x4000_0000, false).is_none());
         assert!(permission_bit(0xc002_0000, false).is_none());
+    }
+
+    /// The I/O permission map must encode the PIO policy: only the denied
+    /// ports trap, and the string-I/O address-size control bits (bits
+    /// 64K..64K+2, i.e. byte offset 8192) stay clear so string I/O follows
+    /// the port bits exactly like the Intel I/O bitmaps.
+    #[test]
+    fn test_iopm_follows_policy() {
+        let mut map = [0u8; 3 * 4096];
+        apply_io_policy(&mut map);
+        let trapped = |port: u16| -> bool { map[port as usize / 8] & (1 << (port % 8)) != 0 };
+        // PM1a_CNT (0x604-0x605) and the APMC block (0xB0-0xB3) trap.
+        for port in [0x604u16, 0x605, 0xb0, 0xb1, 0xb2, 0xb3] {
+            assert!(trapped(port), "port {:#x} must trap", port);
+        }
+        // Everything else passes through at bare-metal speed.
+        for port in [0x3f8u16, 0xcf8, 0xcfc, 0x606, 0x603, 0xb4, 0xaf, 0xffff] {
+            assert!(!trapped(port), "port {:#x} must not trap", port);
+        }
+        // String-I/O address-size control bits stay clear.
+        assert_eq!(map[8192], 0);
     }
 }

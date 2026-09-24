@@ -118,7 +118,9 @@ pub fn reclaim_pages(
         let encl_ptr = page
             .encl_addr
             .as_guest_ptr_ns::<HvEnclDesc>(&gpt, PrivilegeLevel::Supervisor);
-        let enclave = ENCLAVE_MANAGER.get().find_enclave(encl_ptr.as_guest_paddr()?)?;
+        let enclave = ENCLAVE_MANAGER
+            .get()
+            .find_enclave(encl_ptr.as_guest_paddr()?)?;
         if !enclave.elrange.contains(&gvaddr) {
             return hypercall_hv_err_result!(
                 EINVAL,

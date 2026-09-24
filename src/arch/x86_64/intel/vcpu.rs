@@ -28,7 +28,7 @@ use x86_64::addr::VirtAddr;
 use x86_64::registers::control::{Cr0, Cr0Flags, Cr3, Cr4, Cr4Flags};
 use x86_64::registers::rflags::RFlags;
 
-use super::structs::{MsrArea, MsrBitmap, MSR_AREA_COUNT, VmxRegion};
+use super::structs::{IoBitmap, MsrArea, MsrBitmap, VmxRegion, MSR_AREA_COUNT};
 use crate::arch::cpuid::CpuFeatures;
 use crate::arch::segmentation::{Segment, SegmentAccessRights};
 use crate::arch::tables::{GDTStruct, GDT, IDT};
@@ -56,6 +56,7 @@ pub struct Vcpu {
 
 lazy_static! {
     static ref MSR_BITMAP: MsrBitmap = MsrBitmap::from_policy();
+    static ref IO_BITMAP: IoBitmap = IoBitmap::from_policy();
 }
 
 macro_rules! set_guest_segment {
@@ -361,8 +362,9 @@ impl Vcpu {
         Vmcs::set_control(
             VmcsField32Control::PROC_BASED_VM_EXEC_CONTROL,
             Msr::IA32_VMX_PROCBASED_CTLS.read(),
-            // NO UNCOND_IO_EXITING to pass-through PIO
-            (CpuCtrl::USE_MSR_BITMAPS | CpuCtrl::SEC_CONTROLS).bits(),
+            // NO UNCOND_IO_EXITING: the I/O bitmaps trap only the ports the
+            // PIO policy denies; everything else runs at bare-metal speed.
+            (CpuCtrl::USE_MSR_BITMAPS | CpuCtrl::USE_IO_BITMAPS | CpuCtrl::SEC_CONTROLS).bits(),
             (CpuCtrl::CR3_LOAD_EXITING | CpuCtrl::CR3_STORE_EXITING).bits(),
         )?;
 
@@ -418,6 +420,8 @@ impl Vcpu {
         unsafe { cell.gpm.activate() }; // Set EPT_POINTER
 
         VmcsField64Control::MSR_BITMAP.write(MSR_BITMAP.paddr() as _)?;
+        VmcsField64Control::IO_BITMAP_A.write(IO_BITMAP.paddr_a() as _)?;
+        VmcsField64Control::IO_BITMAP_B.write(IO_BITMAP.paddr_b() as _)?;
         VmcsField32Control::EXCEPTION_BITMAP.write(0)?;
 
         Ok(())

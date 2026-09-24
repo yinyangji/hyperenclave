@@ -307,13 +307,7 @@ impl CpuidPolicy {
 }
 
 /// Apply the vendor-independent policy masks to a raw CPUID result.
-fn apply_masks(
-    leaf: u32,
-    subleaf: u32,
-    regs: &mut CpuidRegs,
-    guest_osxsave: bool,
-    stealth: bool,
-) {
+fn apply_masks(leaf: u32, subleaf: u32, regs: &mut CpuidRegs, guest_osxsave: bool, stealth: bool) {
     match leaf {
         // Leaf 1: x86 feature information.
         1 => {
@@ -358,9 +352,8 @@ fn apply_masks(
         // width is always the truth.
         0x8000_0008 => {
             let phys_width = regs.eax & 0xff;
-            regs.eax = (regs.eax & !0xffff)
-                | GUEST_ADDR_WIDTH << 8
-                | phys_width.min(GUEST_ADDR_WIDTH);
+            regs.eax =
+                (regs.eax & !0xffff) | GUEST_ADDR_WIDTH << 8 | phys_width.min(GUEST_ADDR_WIDTH);
         }
         // Leaf 0xD keeps its bare-metal values: the monitor's xsave
         // management (xcr0_supported_bits / xsave_state_info) is built on

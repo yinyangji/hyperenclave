@@ -20,6 +20,7 @@ mod entry;
 mod exception;
 mod msr;
 mod page_table;
+mod pio;
 mod segmentation;
 mod tables;
 mod xsave;

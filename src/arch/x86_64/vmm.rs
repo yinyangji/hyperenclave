@@ -109,11 +109,15 @@ impl VmExit<'_> {
         super::msr::handle_wrmsr(self.cpu_data)
     }
 
+    pub fn handle_pio(&mut self, port: u16, is_read: bool, instr_len: u8) -> HvResult {
+        super::pio::handle_pio(self.cpu_data, port, is_read, instr_len)
+    }
+
     pub fn handle_cpuid(&mut self) -> HvResult {
         let (function, subfunction, guest_osxsave) = {
             let regs = self.cpu_data.vcpu.regs();
-            let guest_osxsave = Cr4Flags::from_bits_truncate(self.cpu_data.vcpu.cr(4))
-                .contains(Cr4Flags::OSXSAVE);
+            let guest_osxsave =
+                Cr4Flags::from_bits_truncate(self.cpu_data.vcpu.cr(4)).contains(Cr4Flags::OSXSAVE);
             (regs.rax as u32, regs.rcx as u32, guest_osxsave)
         };
         let result = self

@@ -197,6 +197,15 @@ impl VmExit<'_> {
                 1 => self.handle_msr_write(),
                 _ => hv_result_err!(EIO),
             },
+            SvmExitCode::IOIO => {
+                // EXITINFO1 (SVM Ref. Manual §2): bits 31:16 = port number,
+                // bit 0 = TYPE (1 = IN, 0 = OUT). EXITINFO2 is the RIP that
+                // follows the instruction, so the length is the difference.
+                let port = (exit_info.exit_info_1 >> 16) as u16;
+                let is_read = exit_info.exit_info_1 & 1 != 0;
+                let instr_len = (exit_info.exit_info_2 - exit_info.guest_rip) as u8;
+                self.handle_pio(port, is_read, instr_len)
+            }
             SvmExitCode::SHUTDOWN => {
                 error!("#VMEXIT(SHUTDOWN): {:#x?}", exit_info);
                 self.cpu_data.vcpu.inject_fault()?;

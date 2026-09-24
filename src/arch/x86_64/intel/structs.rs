@@ -123,6 +123,57 @@ impl MsrBitmap {
     }
 }
 
+/// Intel I/O bitmaps (SDM Vol.3 §24.6.4): bitmap A traps ports
+/// 0x0000-0x7FFF, bitmap B traps 0x8000-0xFFFF, one bit per port, set =
+/// intercept. String INS/OUTS follow the same port bits, and a multi-byte
+/// access traps if any covered port bit is set — so encoding the trapped
+/// ports is sufficient. Built from the same shared PIO policy table as the
+/// AMD IOPM, so both vendors intercept exactly the same port set.
+pub(super) struct IoBitmap {
+    a: AlignedPage,
+    b: AlignedPage,
+}
+
+impl IoBitmap {
+    pub fn from_policy() -> Self {
+        let mut map = Self {
+            a: AlignedPage::new(),
+            b: AlignedPage::new(),
+        };
+        crate::arch::pio::foreach_trapped_port(|port| map.mask(port));
+        map
+    }
+
+    fn mask(&mut self, port: u16) {
+        // Bit set means "intercept" (same convention as the MSR bitmap).
+        let (page, port) = if port < 0x8000 {
+            (&mut self.a[..], port)
+        } else {
+            (&mut self.b[..], port - 0x8000)
+        };
+        page[port as usize / 8] |= 1 << (port % 8);
+    }
+
+    /// Test an interception bit (unit tests / debugging only).
+    #[cfg(test)]
+    fn is_intercepted(&self, port: u16) -> bool {
+        let (page, port) = if port < 0x8000 {
+            (&self.a[..], port)
+        } else {
+            (&self.b[..], port - 0x8000)
+        };
+        page[port as usize / 8] & (1 << (port % 8)) != 0
+    }
+
+    pub fn paddr_a(&self) -> usize {
+        phys_encrypted(virt_to_phys(self.a.as_ptr() as usize))
+    }
+
+    pub fn paddr_b(&self) -> usize {
+        phys_encrypted(virt_to_phys(self.b.as_ptr() as usize))
+    }
+}
+
 /// MSR index/value pairs loaded by VM entry (and stored on VM exit) for
 /// AreaSwap MSRs that have no VMCS guest field.
 /// Layout per Intel SDM Vol.3 §24.7.2/§27.4: 32-bit index, 32 bits reserved,
@@ -203,8 +254,8 @@ mod tests {
         assert!(map.is_intercepted(0xc000_0100, true)); // FS_BASE: area swap
         assert!(!map.is_intercepted(0xfe, false)); // MTRRCAP: read passthrough
         assert!(map.is_intercepted(0xfe, true)); // MTRRCAP: write denied
-        // Exhaustive consistency over every table entry that the bitmap
-        // covers (both windows, all four quadrants).
+                                                 // Exhaustive consistency over every table entry that the bitmap
+                                                 // covers (both windows, all four quadrants).
         for entry in policy::MSR_POLICY_TABLE.iter() {
             for msr in entry.first..=entry.last {
                 if !MsrBitmap::covers(msr) {
@@ -239,6 +290,26 @@ mod tests {
                 msr
             );
         }
+    }
+
+    #[test]
+    fn test_io_bitmap_follows_policy() {
+        let map = IoBitmap::from_policy();
+        // Trapped ports: PM1a_CNT (0x604-0x605) and the APMC block (0xB0-0xB3).
+        for port in [0x604u16, 0x605, 0xb0, 0xb1, 0xb2, 0xb3] {
+            assert!(map.is_intercepted(port), "port {:#x} must trap", port);
+        }
+        // Everything else (incl. bitmap B) passes through at bare-metal speed.
+        for port in [
+            0x3f8u16, 0xcf8, 0xcfc, 0x606, 0x603, 0xb4, 0xaf, 0x8000, 0xffff,
+        ] {
+            assert!(!map.is_intercepted(port), "port {:#x} must not trap", port);
+        }
+        // The bitmap encodes exactly the ports the policy traps.
+        let count = (0..=0xffffu32)
+            .filter(|p| map.is_intercepted(*p as u16))
+            .count();
+        assert_eq!(count, 6);
     }
 
     #[test]

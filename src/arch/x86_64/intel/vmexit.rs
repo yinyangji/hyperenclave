@@ -175,6 +175,14 @@ impl VmExit<'_> {
             VmxExitReason::EXCEPTION_NMI => self.handle_exception_nmi(&exit_info),
             VmxExitReason::EXTERNAL_INTERRUPT => self.handle_external_interrupt(&exit_info),
             VmxExitReason::CPUID => self.handle_cpuid(),
+            VmxExitReason::IO_INSTRUCTION => {
+                // Exit qualification (SDM Vol.3 Table 27-6): bits 31:16 =
+                // port number, bit 3 = direction (1 = IN, 0 = OUT).
+                let qual = VmcsField64ReadOnly::EXIT_QUALIFICATION.read()?;
+                let port = (qual >> 16) as u16;
+                let is_read = qual & (1 << 3) != 0;
+                self.handle_pio(port, is_read, exit_info.exit_instruction_length as u8)
+            }
             VmxExitReason::VMCALL => self.handle_hypercall(),
             VmxExitReason::MSR_READ => self.handle_msr_read(),
             VmxExitReason::MSR_WRITE => self.handle_msr_write(),

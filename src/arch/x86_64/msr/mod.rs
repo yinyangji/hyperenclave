@@ -62,7 +62,10 @@ pub fn handle_rdmsr(cpu: &mut PerCpu) -> HvResult {
         }
         MsrAction::AreaSwap => {
             let value = cpu.vcpu.rdmsr_virt(id).ok_or_else(|| {
-                hv_err!(EINVAL, format!("no virtualized backing for MSR {:#x} ({})", id, name))
+                hv_err!(
+                    EINVAL,
+                    format!("no virtualized backing for MSR {:#x} ({})", id, name)
+                )
             })?;
             write_msr_result(cpu, value);
         }
