@@ -422,6 +422,11 @@ impl Vcpu {
         VmcsField64Control::MSR_BITMAP.write(MSR_BITMAP.paddr() as _)?;
         VmcsField64Control::IO_BITMAP_A.write(IO_BITMAP.paddr_a() as _)?;
         VmcsField64Control::IO_BITMAP_B.write(IO_BITMAP.paddr_b() as _)?;
+        // TSC offset (design §7): the per-VP time baseline is owned by the
+        // monitor. Stage 1 keeps it 0 so RDTSC/RDTSCP read the real TSC
+        // (functionally passthrough); a future non-zero per-VP offset also
+        // requires setting the USE_TSC_OFFSETTING primary control.
+        VmcsField64Control::TSC_OFFSET.write(0)?;
         VmcsField32Control::EXCEPTION_BITMAP.write(0)?;
 
         Ok(())

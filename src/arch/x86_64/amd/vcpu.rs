@@ -356,6 +356,11 @@ impl Vcpu {
         // I/O permission map base, likewise 4-KiB aligned (a VMRUN validity
         // requirement whenever the IOIO_PROT interception is active).
         vmcb.iopm_base_pa = self.iopm.frame.start_paddr() as _;
+        // TSC offset (design §7): the per-VP time baseline is owned by the
+        // monitor. AMD applies it unconditionally to guest RDTSC/RDTSCP, so
+        // stage 1 keeps it 0 (functionally passthrough); the field is wired
+        // for a future non-zero per-VP offset.
+        vmcb.tsc_offset = 0;
 
         self.vmcb.set_intercept(SvmIntercept::NMI, true);
         self.vmcb.set_intercept(SvmIntercept::CPUID, true);

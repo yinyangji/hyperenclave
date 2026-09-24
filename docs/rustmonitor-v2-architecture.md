@@ -168,19 +168,21 @@ v2 的 fail-closed 默认、拦截面选择与验证范围均以下述威胁模�
 
 ### 2.2 重构的债务（v2 的问题清单，均有代码锚点）
 
-| # | 债务 | 代码锚点 | 影响 |
-|---|---|---|---|
-| D1 | MSR 处理空壳：读恒返 0、写丢弃 | `src/arch/x86_64/vmm.rs:89,101` | host 内核读 APIC_BASE/MTRR 等得到错误值，行为不可预测 |
-| D2 | Intel/AMD 拦截不对称：Intel 有 MSR bitmap（PAT/MTRR/x2APIC），AMD 未设 MSR 拦截 | `intel/structs.rs` vs `amd/vcpu.rs:226-242` | 同一策略两厂商行为不同 |
-| D3 | VMCS MSR 自动切换区未启用 | `intel/vcpu.rs:372`（`VM_EXIT_MSR_STORE_COUNT=0`） | 缺失 host/guest MSR 状态的零成本切换通道 |
-| D4 | 仅 GU-Enclave：进入时禁用 EFER.SCE | `arch/x86_64/enclave.rs:212` | HU/P-Enclave 缺失，论文规格未闭合 |
-| D5 | 全局单例 unsafe：`ENCLAVE_MANAGER` 由 `static mut EMPTY_BUFFER` transmute 而来 | `enclave/manager.rs:90-92` | 84 个 warning 中 `static_mut_refs` 类 UB 风险的主要来源 |
-| D6 | 单 Cell（Root Cell），无分区抽象 | `src/cell.rs` | 无法表达多隔离域/多 guest，扩展受限 |
-| D7 | 5 级页表（LA57）不支持 | `intel/ept.rs:225` | 新平台（LA57 默认开启）无法运行 |
-| D8 | CR0/CR4 保留位不检查 | `intel/vcpu.rs:79`、`amd/vcpu.rs:64` | guest 可写入未定义组合 |
-| D9 | CPUID 仅最小伪装 | `cpuid.rs` | 拓扑/特性视图不受控 |
-| D10 | 电源/SMI/CPU 热插拔缺失 | — | S3 后 monitor 状态不保证 |
-| D11 | 测试覆盖极低（3 个单元测试） | cmr×2、intervaltree×1 | 重构安全网不足 |
+| # | 债务 | 代码锚点 | 影响 | 状态（2026-09） |
+|---|---|---|---|---|
+| D1 | MSR 处理空壳：读恒返 0、写丢弃 | `src/arch/x86_64/vmm.rs:89,101` | host 内核读 APIC_BASE/MTRR 等得到错误值，行为不可预测 | ✅ PR2（MSR 子系统重建） |
+| D2 | Intel/AMD 拦截不对称：Intel 有 MSR bitmap（PAT/MTRR/x2APIC），AMD 未设 MSR 拦截 | `intel/structs.rs` vs `amd/vcpu.rs:226-242` | 同一策略两厂商行为不同 | ✅ PR2（同表驱动双厂商位图） |
+| D3 | VMCS MSR 自动切换区未启用 | `intel/vcpu.rs:372`（`VM_EXIT_MSR_STORE_COUNT=0`） | 缺失 host/guest MSR 状态的零成本切换通道 | ✅ PR2（MSR load/store area 启用） |
+| D4 | 仅 GU-Enclave：进入时禁用 EFER.SCE | `arch/x86_64/enclave.rs:212` | HU/P-Enclave 缺失，论文规格未闭合 | ⬜ PR6（HU-Enclave 未实现） |
+| D5 | 全局单例 unsafe：`ENCLAVE_MANAGER` 由 `static mut EMPTY_BUFFER` transmute 而来 | `enclave/manager.rs:90-92` | 84 个 warning 中 `static_mut_refs` 类 UB 风险的主要来源 | ✅ PR1（LateInit） |
+| D6 | 单 Cell（Root Cell），无分区抽象 | `src/cell.rs` | 无法表达多隔离域/多 guest，扩展受限 | ⬜ 不在 v2 范围（多分区不实现） |
+| D7 | 5 级页表（LA57）不支持 | `intel/ept.rs:225` | 新平台（LA57 默认开启）无法运行 | ◐ PR1 fail-fast（拒绝 LA57 激活）；5 级 EPT ⬜ P2 |
+| D8 | CR0/CR4 保留位不检查 | `intel/vcpu.rs:79`、`amd/vcpu.rs:64` | guest 可写入未定义组合 | ✅ PR1（保留位校验） |
+| D9 | CPUID 仅最小伪装 | `cpuid.rs` | 拓扑/特性视图不受控 | ✅ PR3（策略引擎：快照+掩码） |
+| D10 | 电源/SMI/CPU 热插拔缺失 | — | S3 后 monitor 状态不保证 | ◐ PR4（PIO/PM/APMC + SMM 锁定）；CPU 热插拔 §8 ⬜ |
+| D11 | 测试覆盖极低（3 个单元测试） | cmr×2、intervaltree×1 | 重构安全网不足 | ✅ PR1–PR5（AMD 21 / Intel 22） |
+
+> **状态图例**：✅ 已解决 / ◐ 部分解决 / ⬜ 未实现。债务的权威追踪见《实现设计》§0.2 差距总表与 §12 PR 切分（D1–D3→§3、D4→§6、D5/D7/D8→§9、D9→§4、D10→§5/§8、D11→§11）。D6（多分区）按 v2 架构 §6 明确不实现。
 
 ---
 

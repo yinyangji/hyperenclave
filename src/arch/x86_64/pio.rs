@@ -131,6 +131,7 @@ pub fn handle_pio(cpu: &mut PerCpu, port: u16, is_read: bool, instr_len: u8) -> 
                 name,
                 if is_read { "read" } else { "write" }
             );
+            crate::arch::POLICY_STATS.record_pio_deny();
             cpu.vcpu.inject_fault()?;
             // #GP is a fault: RIP stays on the I/O instruction.
             Ok(())

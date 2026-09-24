@@ -71,6 +71,7 @@ pub fn handle_rdmsr(cpu: &mut PerCpu) -> HvResult {
         }
         MsrAction::Deny => {
             error!("RDMSR({:#x} {}) denied by policy", id, name);
+            crate::arch::POLICY_STATS.record_msr_deny();
             cpu.vcpu.inject_fault()?;
             return Ok(());
         }
@@ -102,6 +103,7 @@ pub fn handle_wrmsr(cpu: &mut PerCpu) -> HvResult {
         MsrAction::AreaSwap => cpu.vcpu.wrmsr_virt(id, value)?,
         MsrAction::Deny => {
             error!("WRMSR({:#x} {}) denied by policy", id, name);
+            crate::arch::POLICY_STATS.record_msr_deny();
             cpu.vcpu.inject_fault()?;
             return Ok(());
         }

@@ -25,8 +25,8 @@ use bit_field::BitField;
 use numeric_enum_macro::numeric_enum;
 
 use crate::arch::vmm::VcpuAccessGuestState;
-use crate::arch::{EnclaveExceptionInfo, GuestPageTableImmut};
-use crate::memory::gaccess::AsGuestPtr;
+use crate::arch::{EnclaveExceptionInfo, GuestPageTableImmut, PolicyStatsSnapshot};
+use crate::memory::gaccess::{AsGuestPtr, GuestPtr};
 use crate::percpu::{CpuState, PerCpu};
 
 use self::error::HyperCallResult;
@@ -61,6 +61,16 @@ numeric_enum! {
 
         InitCmrm = 0x200,
         SetInitCmrmDone = 0x201,
+
+        // v2 ABI extensions (implementation design §10). Registered here so
+        // the code space is reserved and the privilege / validate_state
+        // checks are wired; the HU-domain (§6) and CPU-park (§8) bodies land
+        // with their own PRs, GetPolicyStats is implemented now.
+        HuDomainRegister = 0x30,
+        HuDomainUnregister = 0x31,
+        CpuPark = 0x40,
+        CpuUnpark = 0x41,
+        GetPolicyStats = 0x42,
 
         EnclaveEnter            = 0x8000_0000,
         EnclaveExit             = 0x8000_0001,
@@ -117,6 +127,10 @@ impl HyperCallCode {
             | HyperCallCode::SharedMemoryInvalidEnd
             | HyperCallCode::InitCmrm
             | HyperCallCode::SetInitCmrmDone
+            | HyperCallCode::HuDomainRegister
+            | HyperCallCode::HuDomainUnregister
+            | HyperCallCode::CpuPark
+            | HyperCallCode::GetPolicyStats
             | HyperCallCode::EnclaveEnter
             | HyperCallCode::EnclaveResume
             | HyperCallCode::EnclaveQuote
@@ -133,6 +147,10 @@ impl HyperCallCode {
             | HyperCallCode::EnclaveReport
             | HyperCallCode::EnclaveGetKey
             | HyperCallCode::EnclaveVerifyReport => *cpu_state == CpuState::EnclaveRunning,
+
+            // CpuUnpark runs on the wake path, where the CPU has returned to
+            // Linux and the monitor is off on it (implementation design §10).
+            HyperCallCode::CpuUnpark => *cpu_state == CpuState::HvDisabled,
         }
     }
 }
@@ -275,6 +293,15 @@ impl<'a> HyperCall<'a> {
             ),
             HyperCallCode::InitCmrm => self.init_cmrm(arg0),
             HyperCallCode::SetInitCmrmDone => self.set_init_cmrm_done(),
+            HyperCallCode::GetPolicyStats => {
+                self.get_policy_stats(arg0.as_guest_ptr_ns(&self.gpt, guest_privilege_level))
+            }
+            // §6 HU-domain and §8 CPU-park: codes reserved, bodies not yet
+            // implemented — refuse cleanly instead of falling through.
+            HyperCallCode::HuDomainRegister
+            | HyperCallCode::HuDomainUnregister
+            | HyperCallCode::CpuPark
+            | HyperCallCode::CpuUnpark => hypercall_hv_err_result!(ENOSYS),
             HyperCallCode::EnclaveEnter => self.enclave_enter(),
             HyperCallCode::EnclaveExit => self.enclave_exit(),
             HyperCallCode::EnclaveAccept => self.enclave_accept(),
@@ -365,5 +392,19 @@ impl<'a> HyperCall<'a> {
 
         self.cpu_data.deactivate_vmm(0)?;
         unreachable!();
+    }
+
+    /// Export the fail-closed policy counters into the guest buffer at
+    /// `arg0` (implementation design §10, GetPolicyStats). Diagnostic only:
+    /// it reports MSR/PIO accesses the monitor already refused, and never
+    /// gates a security decision.
+    fn get_policy_stats(
+        &self,
+        mut stats_ptr: GuestPtr<PolicyStatsSnapshot>,
+    ) -> HyperCallResult<usize> {
+        let snapshot = crate::arch::POLICY_STATS.snapshot();
+        debug!("get_policy_stats: {:#x?}", snapshot);
+        stats_ptr.write(snapshot)?;
+        Ok(0)
     }
 }
