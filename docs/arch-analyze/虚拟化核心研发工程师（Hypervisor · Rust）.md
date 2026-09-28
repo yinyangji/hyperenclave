@@ -8,23 +8,27 @@
 
 ### 岗位名称
 
-虚拟化核心研发工程师（跨架构 Hypervisor · Rust）
+虚拟化核心研发工程师（跨架构 Hypervisor · GPU 隔离 · Rust）
 
 ### 岗位简介
 
-本岗位服务于基于 Rust 的裸机 hypervisor 安全监控器研发（开源项目 HyperEnclave 的演进版本）。监控器运行于 CPU 最高特权层（x86-64 Intel VT-x / AMD SVM root 模式，ARM64 EL2），在缺少硬件 TEE 的通用服务器上与外置硬件可信根（FPGA 类安全芯片）软硬协同，为上层机密计算提供可验证的隔离底座。虚拟化层需覆盖鲲鹏、飞腾（ARM64）与海光、AMD、Intel（x86-64）多平台。岗位工作以虚拟化核心子系统研发为主要方向：执行流控制与拦截、二级地址翻译（EPT/NPT/Stage-2）、敏感资源（MSR/CPUID/系统寄存器/IO）虚拟化、设备直通与 DMA 隔离（VT-d/AMD-Vi/SMMU）、跨架构抽象与多平台适配。
+本岗位服务于基于 Rust 的裸机 hypervisor 安全监控器研发。监控器运行于 CPU 最高特权层（x86-64 Intel VT-x / AMD SVM root 模式，ARM64 EL2），在缺少硬件 TEE 的通用服务器上，以软件方式在宿主系统与物理硬件之间建立强制隔离边界。岗位核心目标是把高价值加速设备（尤其是 GPU 显卡）从宿主系统的可达范围中结构性剥离：宿主操作系统及其管理员不再能访问 GPU，GPU 仅按策略授权给特定受保护虚拟机独占直通使用。隔离依托二级地址翻译（EPT/NPT/Stage-2）与 IOMMU/DMA 重映射（VT-d/AMD-Vi/SMMU）实现——GPU 的 MMIO/BAR 与 DMA 通路只对授权 VM 可见，对宿主与其他 VM 结构性不可达。监控器并与外置硬件可信根（FPGA 类安全芯片）软硬协同，完成度量启动、远程证明与密钥放行。虚拟化层需覆盖鲲鹏、飞腾（ARM64）与海光、AMD、Intel（x86-64）多平台。
 
 ### 工作内容
+
+- 设计与实现 GPU 设备隔离与专属直通（核心方向）：把 GPU 从宿主二级地址翻译视图与 DMA 通路中剥离，按策略将 GPU 的 MMIO/BAR、DMA 与 MSI-X 中断独占绑定到授权 VM，实现宿主 GPU 访问剥夺、设备归属仲裁、VM 生命周期内的 GPU 独占与释放
+
+- 实现设备复位与状态清理：VM 切换或释放时执行 GPU 功能级复位（FLR）、显存与 BAR 共享页回收清零、IOMMU 映射与中断重映射解除，防止跨 VM 与宿主的信息残留与越界访问
+
+- 实现 IOMMU 与 DMA 隔离：VT-d/AMD-Vi/SMMU 重映射配置，强制设备 DMA 限定在授权域内存，抵御恶意设备 DMA 越界
+
+- 实现二级地址翻译视图管理：EPT/NPT/Stage-2 页表、安全内存空映射、设备 MMIO 映射、保护域双视图切换、大页映射策略
+
+- 维护与扩展多架构执行流控制：x86 VMCS/VMCB 拦截位图、异常注入、CR0/CR4 guest-host mask 与 read shadow；ARM64 EL2 配置（HCR_EL2 trap 位、Stage-2 翻译表、VHE 宿主内核运行）
 
 - 设计与实现 MSR/系统寄存器虚拟化子系统：拦截策略表、x86 MSR bitmap 与 VMCB MSRPM 双厂商位图生成、VMCS MSR load/store area 硬件切换、ARM64 系统寄存器 trap 配置，按寄存器逐项定义仿真语义
 
 - 建设 CPUID/ID 寄存器策略引擎：启动期快照、特性位掩码、拓扑枚举受控视图
-
-- 维护与扩展多架构执行流控制：x86 VMCS/VMCB 拦截位图、异常注入、CR0/CR4 guest-host mask 与 read shadow；ARM64 EL2 配置（HCR_EL2 trap 位、Stage-2 翻译表、VHE 宿主内核运行）
-
-- 实现二级地址翻译视图管理：EPT/NPT/Stage-2 页表、安全内存空映射、保护域双视图切换、大页映射策略
-
-- 实现设备与 DMA 隔离：VT-d/AMD-Vi/SMMU 重映射配置、设备直通与归属仲裁、共享页与设备复位管理
 
 - 对接外置硬件可信根：经 PCIe/DMA 受控队列与 FPGA 安全芯片交互，协同完成度量启动、远程证明与密钥放行
 
@@ -42,15 +46,21 @@
 
 4. **二级地址翻译**：掌握 EPT/NPT（x86）或 Stage-2（ARM）页表层级与大页映射、violation/fault 限定字段解析，理解 INVEPT/INVLPGA（x86）或 TLBI 指令（ARM）的适用时机
 
-5. **Rust 裸机工程**：熟练进行 no_std 环境开发，掌握内联汇编与 naked function 编写，能够为 unsafe 抽象给出健全性论证
+5. **设备与 DMA 虚拟化**：理解 PCIe 设备模型（BAR/MMIO、配置空间、MSI/MSI-X 中断）、设备直通与归属管理，掌握 VT-d/AMD-Vi/SMMU 的 DMA 重映射与中断重映射机制，能够分析设备 DMA 越界攻击面并给出隔离方案
 
-6. **规范精读能力**：能够按章节定位并精确解读 Intel SDM Vol.3C、AMD APM Vol.2 或 ARM Architecture Reference Manual（DDI 0487）的虚拟化相关章节，工程决策以架构规范为准绳
+6. **Rust 裸机工程**：熟练进行 no_std 环境开发，掌握内联汇编与 naked function 编写，能够为 unsafe 抽象给出健全性论证
+
+7. **规范精读能力**：能够按章节定位并精确解读 Intel SDM Vol.3C、AMD APM Vol.2 或 ARM Architecture Reference Manual（DDI 0487）的虚拟化相关章节，工程决策以架构规范为准绳
 
 ### 优先条件
 
-- 具备国产 CPU 平台（鲲鹏、飞腾、海光）虚拟化适配或 bring-up 经验
+- 具备 GPU/加速卡虚拟化经验：NVIDIA/AMD GPU 直通、vGPU、SR-IOV、GPU MMIO/BAR 重映射或显存隔离任一
 
-- 具备 VT-d、AMD-Vi 或 ARM SMMU（SMMUv3）DMA 重映射配置实践
+- 具备 VT-d、AMD-Vi 或 ARM SMMU（SMMUv3）DMA 重映射与中断重映射配置实践
+
+- 熟悉 vfio 设备直通框架、PCIe ACS、IOMMU group 与设备功能级复位（FLR）机制
+
+- 具备国产 CPU 平台（鲲鹏、飞腾、海光）虚拟化适配或 bring-up 经验
 
 - 熟悉 GICv3/v4 虚拟化（vGIC、List Register、ITS）、APICv、posted interrupt、AVIC 任一中断虚拟化机制
 
@@ -58,13 +68,13 @@
 
 - 具备外置硬件可信根协同经验：FPGA/TPM 类安全芯片对接、度量启动、远程证明、密钥管理
 
-- 参与过 TEE、SGX、TDX、SEV-SNP、ARM CCA 或机密计算方向项目
-
-- 有 GPU/加速卡设备直通、PCIe 设备驱动或 DMA 引擎开发经验
+- 参与过 TEE、SGX、TDX、SEV-SNP、ARM CCA、GPU TEE 或机密计算方向项目
 
 - 有 QEMU 嵌套虚拟化调试经验，掌握 GDB remote 与串口日志排障方法
 
 - 对 Coq 等形式化验证工具有基础
+
+- 有 HyperEnclave、HyperGPU 等开源机密计算项目研究经验
 
 ---
 
@@ -78,13 +88,15 @@
 
 - 独立编写或深度参与过 hypervisor 项目（课程实现、研究原型、开源项目均可，需能说明细节）
 
-- 工作经历中含 VMM、IOMMU、设备直通、机密计算（TDX/SEV\-SNP）任一方向
+- 工作经历中含 VMM、IOMMU、GPU/设备直通、机密计算（TDX/SEV\-SNP）任一方向
 
 - 技术博客或论文中引用 SDM/APM/ARM ARM 具体章节讨论过虚拟化细节
 
 - 具备 ARM64 EL2 虚拟化（Stage-2、GICv3/v4、SMMU）或国产 CPU 平台（鲲鹏/飞腾/海光）适配经验
 
 - 有外置硬件可信根（FPGA/TPM）软硬协同、度量启动或远程证明实现经验
+
+- 有 GPU 设备隔离与直通研发经历：GPU 直通/vGPU、SR-IOV、vfio、显存与 BAR 隔离、设备 DMA 隔离任一
 
 **弱信号（需电话初筛确认）**：
 
@@ -106,7 +118,7 @@
 
 > 每题标注考察维度与分值。合格信号给出预期答案要点；警示信号给出典型错误。面试官按候选人实际回答对照评分，不要求逐题全问，每个维度至少一题。
 
-#### 维度 A：x86\-64 体系结构（权重 12%）
+#### 维度 A：x86\-64 体系结构（权重 10%）
 
 **A1\.（2 分）描述 64 位模式下一次内存访问从线性地址到物理地址的完整翻译过程。PCID 在其中起什么作用？**
 
@@ -132,7 +144,7 @@
 
 - 警示信号：不知道 ICR 写即触发发送，认为只是设置寄存器状态
 
-#### 维度 B：VMX/SVM 执行模型（权重 20%）
+#### 维度 B：VMX/SVM 执行模型（权重 18%）
 
 **B1\.（2 分）VMLAUNCH 失败有哪些路径？如何定位失败原因？**
 
@@ -164,7 +176,7 @@
 
 - 警示信号：与 unrestricted guest 的适用前提混淆
 
-#### 维度 C：拦截机制配置（权重 20%）
+#### 维度 C：拦截机制配置（权重 16%）
 
 **C1\.（3 分）MSR bitmap 中某位从 0 改为 1，guest 的 RDMSR 与 WRMSR 分别发生什么变化？bitmap 的四个区域如何组织？**
 
@@ -196,7 +208,7 @@
 
 - 警示信号：只答"拦截异常"，说不出进入/退出时的动态切换用途
 
-#### 维度 D：二级地址翻译（EPT/NPT）（权重 8%）
+#### 维度 D：二级地址翻译（EPT/NPT）（权重 10%）
 
 **D1\.（2 分）EPT violation 的 exit qualification 里有哪些关键字段？软件如何区分读/写/执行违规？**
 
@@ -216,7 +228,7 @@
 
 - 警示信号：认为必须拦截 CR3（未理解分区直通模型与二级翻译的兜底关系）
 
-#### 维度 E：Rust 裸机工程（权重 12%）
+#### 维度 E：Rust 裸机工程（权重 10%）
 
 **E1\.（3 分）no\_std 裸机环境下如何实现全局可变状态？static mut 直接引用有什么问题？**
 
@@ -241,7 +253,7 @@ pub static MANAGER: &Manager = unsafe { core::mem::transmute(&EMPTY_BUFFER) };
 
 - 警示信号：看不出问题（认为 transmute 数组到引用是安全惯用法）；或只说"加 unsafe 块就行"
 
-#### 维度 F：安全思维与综合设计（权重 8%）
+#### 维度 F：安全思维与综合设计（权重 6%）
 
 **F1\.（2 分）guest 访问一条策略表未定义的 MSR，monitor 应该返回什么？为什么？**
 
@@ -271,7 +283,7 @@ pub static MANAGER: &Manager = unsafe { core::mem::transmute(&EMPTY_BUFFER) };
 
 - 警示信号：方案只写 handler 逻辑而完全遗漏位图配置（不知道拦截由硬件配置触发）；advance/rollback RIP 方向搞反
 
-#### 维度 G：ARM64 EL2 与跨架构虚拟化（权重 12%）
+#### 维度 G：ARM64 EL2 与跨架构虚拟化（权重 10%）
 
 **G1.（2 分）ARM 异常级别 EL0–EL3 各自的职责？EL2 在虚拟化中扮演什么角色？VHE 解决什么问题？**
 
@@ -333,20 +345,67 @@ pub static MANAGER: &Manager = unsafe { core::mem::transmute(&EMPTY_BUFFER) };
 
 - 警示信号：认为 Host 可信、芯片接口无需隔离；忽视 DMA 越界与重放攻击面
 
+#### 维度 I：GPU 设备隔离与专属直通（权重 12%）
+
+**I1.（2 分）如何把 GPU 从宿主系统强制隔离，使宿主操作系统与管理员都无法访问 GPU？涉及哪些机制？**
+
+- 合格信号：宿主二级页表（EPT/NPT/Stage-2）不映射 GPU 的 MMIO/BAR（结构性挖洞），宿主对 GPU 配置空间与寄存器的访问不可达；IOMMU（VT-d/AMD-Vi/SMMU）不为宿主域配置 GPU 的 DMA 通路；GPU 中断（MSI-X）不经中断重映射路由到宿主；隔离靠“映射不存在”而非逐次拦截，宿主即便 ring0 也无法触达
+
+- 警示信号：认为靠拦截宿主驱动调用即可（未理解结构性剥离）；不知道 MMIO/BAR 与 DMA 两条通路都要断
+
+**I2.（3 分）GPU 仅授权特定 VM 独占直通，需要哪些机制协同？设备归属如何绑定到该 VM？**
+
+- 合格信号（按要点累计）：
+
+    1. GPU MMIO/BAR 只映射进授权 VM 的二级页表（GPA→GPU 物理 BAR），其他 VM 与宿主的二级页表均不含；
+
+    2. IOMMU/SMMU Stage-2 把 GPU 的 DMA 限定到授权 VM 的内存（GPA→HPA 仅覆盖该 VM），防止 GPU DMA 越界；
+
+    3. GPU 的 MSI-X 中断经中断重映射（VT-d IR / SMMU ITS）路由到该 VM 的 vCPU；
+
+    4. 设备归属由监控器仲裁并登记（一个 GPU 同一时刻只绑定一个域），绑定/解绑经 hypercall；
+
+    5. 加分：指出 GPU 配置空间访问、PCIe ACS（防 peer-to-peer DMA 绕过 IOMMU）、显存 aperture 的隔离
+
+- 警示信号：只答“把 GPU 给 VM”说不出 MMIO/DMA/中断三条通路的绑定；忽视设备归属的唯一性仲裁
+
+**I3.（3 分）VM 释放或切换 GPU 时，如何防止信息残留与越界？前一个 VM 的显存数据会不会泄露给下一个 VM 或宿主？**
+
+- 合格信号（按要点累计）：
+
+    1. GPU 功能级复位（FLR）清空设备内部状态与引擎上下文；
+
+    2. 显存与 BAR 映射的共享页在解绑时回收并清零（防显存残留前一 VM 数据）；
+
+    3. 解除该 VM 的 IOMMU/SMMU Stage-2 映射与中断重映射条目，使 GPU 对原 VM 不再可达；
+
+    4. 失效相关 TLB（IOTLB \+ CPU 二级翻译 TLB），确保旧映射不被缓存复用；
+
+    5. 加分：指出复位与清零的时序（先解除映射再复位，防复位窗口 DMA）、GPU 固件/引擎残留状态、多 GPU/NVLink 拓扑下的归属一致性
+
+- 警示信号：认为解绑只需删映射（漏掉显存清零与设备复位）；不知道 IOTLB 失效的必要性
+
+**I4.（2 分）为什么 IOMMU 是 GPU 隔离的必需而非可选？恶意设备 DMA 的攻击面是什么？**
+
+- 合格信号：设备可绕过 CPU 直接发起 DMA 访存，若仅靠 CPU 二级页表隔离而 GPU/设备 DMA 不受 IOMMU 约束，被隔离的 GPU 或恶意设备仍可 DMA 读写宿主或其他 VM 内存，摧毁隔离；IOMMU 对设备 DMA 做与 CPU 二级翻译同构的地址重映射，把 DMA 限定在授权域；对照 HyperGPU 威胁模型——可抵抗管理员提权、CVM 串通、恶意设备 DMA，前提正是 IOMMU 强制 \+ 二级页表结构性剥离
+
+- 警示信号：认为 CPU 二级页表隔离已足够（忽视 DMA 是独立攻击面）；不知道设备可绕过 CPU 访存
+
 ### 三、评分标准
 
 **维度权重与分值**：
 
 |维度|权重|题目|满分|
 |---|---|---|---|
-|A x86-64 体系结构|12%|A1–A4|7|
-|B VMX/SVM 执行模型|20%|B1–B5|11|
-|C 拦截机制配置|20%|C1–C5|12|
-|D 二级地址翻译（EPT/NPT）|8%|D1–D3|6|
-|E Rust 裸机工程|12%|E1–E3|8|
-|F 安全思维与设计|8%|F1–F3|7|
-|G ARM64 与跨架构虚拟化|12%|G1–G5|12|
+|A x86-64 体系结构|10%|A1–A4|7|
+|B VMX/SVM 执行模型|18%|B1–B5|11|
+|C 拦截机制配置|16%|C1–C5|12|
+|D 二级地址翻译（EPT/NPT）|10%|D1–D3|6|
+|E Rust 裸机工程|10%|E1–E3|8|
+|F 安全思维与设计|6%|F1–F3|7|
+|G ARM64 与跨架构虚拟化|10%|G1–G5|12|
 |H 软硬协同可信根与隔离计算|8%|H1–H3|8|
+|I GPU 设备隔离与专属直通|12%|I1–I4|10|
 
 **得分换算**：按维度满分归一化为百分制后加权求和。
 
@@ -354,8 +413,8 @@ pub static MANAGER: &Manager = unsafe { core::mem::transmute(&EMPTY_BUFFER) };
 
 |等级|标准|结论|
 |---|---|---|
-|Strong Hire|总分 ≥ 85，且 B\+C 合计得分 ≥ 80%，F3 设计题至少 2 分|直接推进，可考虑定级上浮|
-|Hire|总分 ≥ 70，且 B\+C 合计得分 ≥ 65%|推进录用|
+|Strong Hire|总分 ≥ 85，且 B\+C 合计得分 ≥ 80%、I 维度 ≥ 70%，F3/I2/I3 任一设计题至少 2 分|直接推进，可考虑定级上浮|
+|Hire|总分 ≥ 70，且 B\+C 合计得分 ≥ 65%、I 维度不低于 50%|推进录用|
 |Lean Hire|总分 ≥ 60，B\+C 有单题亮点但有知识盲区|视缺口可培养性决定，需二面复核薄弱维度|
 |No Hire|总分 \< 60，或 B\+C 合计 \< 50%|终止|
 
@@ -381,8 +440,8 @@ pub static MANAGER: &Manager = unsafe { core::mem::transmute(&EMPTY_BUFFER) };
 |---|---|---|---|
 |电话初筛|电话|15 分钟|筛选确认二题 \+ 项目真实性核对|
 |一面|技术|90 分钟|维度 A/B/C（B\+C 为重心），B2、C1、C2 必问|
-|二面|技术|90 分钟|维度 D/E/F/G（G 按候选人架构侧重选问），E3、F3 必问（现场编码环境备好）|
-|三面|架构对话|60 分钟|给出现网约束（x86 双厂商与 ARM64 多平台、5.4/5.10 内核、无 CPU-TEE 硬件、外置 FPGA 可信根），候选人阐述“如何为一个新平台（如鲲鹏 ARM64）从零补齐虚拟化适配与 MSR/系统寄存器策略表”，考察跨架构方法论、规范检索习惯与软硬协同设计能力|
+|二面|技术|90 分钟|维度 D/E/F/G/I（G 按候选人架构侧重选问，I 为 GPU 隔离核心必问），E3、F3、I2 必问（现场编码环境备好）|
+|三面|架构对话|60 分钟|给出现网约束（无 CPU/GPU 硬件 TEE、x86 双厂商与 ARM64 多平台、外置 FPGA 可信根），候选人阐述“如何把 GPU 从宿主系统强制隔离、仅授权特定 VM 独占直通”的完整设计——覆盖二级页表剥离、IOMMU/SMMU DMA 绑定、MSI-X 中断重映射、VM 切换时 GPU 复位与显存/BAR 回收清零、恶意设备 DMA 防护，考察设备隔离方法论、威胁建模与软硬协同设计能力|
 
-**三面评估要点**：正确路径应为——查架构规范（x86 SDM Vol.4 列 MSR 清单 / ARM ARM 列系统寄存器 trap 清单）→ 按内核实际访问集回归 → 分类定策略 → 生成架构对应的拦截配置（x86 双厂商位图 / ARM HCR_EL2 等 trap 位）→ 在 QEMU 与多架构实机环境验证；软硬协同侧能说明监控器度量如何接入外置 FPGA 可信根的证据链。只凭记忆和经验直接写表的，记入风险备注。
+**三面评估要点**：GPU 隔离设计的正确路径应为——宿主二级页表与 IOMMU 视图均不含 GPU（结构性剥离，而非拦截宿主驱动调用）→ GPU MMIO/BAR 与 DMA 仅映射进授权 VM 的二级页表/SMMU Stage-2 → MSI-X 中断经中断重映射路由到该 VM → 设备归属唯一仲裁、绑定/解绑经 hypercall → VM 释放时先解除映射再 GPU FLR 复位、显存与共享页清零、IOTLB 失效 → 恶意设备 DMA 由 IOMMU 强制拦截（对照 HyperGPU 威胁模型：可抵抗管理员提权、CVM 串通、恶意设备 DMA）。跨架构与策略表侧：查架构规范（x86 SDM Vol.4 列 MSR 清单 / ARM ARM 列系统寄存器 trap 清单）→ 按内核实际访问集回归 → 分类定策略 → 生成架构对应的拦截配置 → 在 QEMU 与多架构实机环境验证；软硬协同侧能说明监控器度量如何接入外置 FPGA 可信根的证据链。只凭记忆和经验直接写表、或认为 CPU 二级页表隔离即可无视 DMA 攻击面的，记入风险备注。
 
