@@ -310,11 +310,11 @@ GPU 驱动运行于 L1 Host（Primary OS）的 Normal Mode：
 - 这里依赖的是 **TSME（透明全内存加密，单一密钥）**——它加密整机内存，**不按 VM/enclave 域分配独立密钥**，因此**不构成 TDX/SEV-SNP 那样的域加密**，也挡不住同样运行在该密钥下的 L1 宿主软件读取内存。
 - SME 在本方案中的作用是**堵加密视图旁路**：EPC 内存和 hypervisor 内存以加密标记映射（`MemFlags::ENCRYPTED`）；在 GPM 中，加密地址空间（C-bit = 1）的 EPC 区域同样被映射为空页面，防止 Host 通过“加密别名地址”绕过挖洞读取安全数据。
 - IOMMU 和 Host 页表均支持加密/非加密视图的隔离。
-- **结论**：CVM/Enclave 的机密性主防线始终是 §6.1–§6.3 的**页表结构性隔离（软件隔离）**；SME 仅为纵深防御一环，不改变“无按域内存加密、DRAM 中数据对物理攻击者为明文”的边界。
+- **结论**：隔离 VM/Enclave 的机密性主防线始终是 §6.1–§6.3 的**页表结构性隔离（软件隔离）**；SME 仅为纵深防御一环，不改变“无按域内存加密、DRAM 中数据对物理攻击者为明文”的边界。
 
 ### 6.5 HyperGPU：GPU TEE 扩展形态
 
-HyperGPU 是 HyperEnclave 面向 GPU 机密计算（密态大模型等场景）的扩展形态，提供 Enclave、CVM、GPU-TEE 三层抽象。**术语澄清：本文的 CVM 指由 L0 HyperEnclave 软件隔离的「受保护隔离虚拟机」——机密性来自二级页表结构性隔离（宿主软件不可达）、内存明文存于 DRAM，并非 Intel TDX / AMD SEV-SNP 那种以硬件内存加密为前提的标准 Confidential VM（原因见 §6.5.5 与 [rustmonitor-v2-architecture.md](rustmonitor-v2-architecture.md) §1.5）。**其核心思路是把本文前述的 "IOMMU 隔离 + 降级 OS 协同" 模式推广到 GPU 完整可信使用：GPU 驱动、kernel 加载、数据传输链路全程受控。以下内容依据 `docs/arch-images/` 中的 HyperGPU 分享材料（SecretFlow 团队，DataFun/数智大会）整理。
+HyperGPU 是 HyperEnclave 面向 GPU 机密计算（密态大模型等场景）的扩展形态，提供 Enclave、隔离 VM、GPU-TEE 三层抽象。**术语澄清：本文用「隔离 VM」（受保护隔离虚拟机）指由 L0 HyperEnclave 软件隔离的虚拟机——机密性来自二级页表结构性隔离（宿主软件不可达）、内存明文存于 DRAM，并非 Intel TDX / AMD SEV-SNP 那种以硬件内存加密为前提的标准 Confidential VM（CVM）；HyperGPU 原始材料中的「CVM / CVM-Linux」即指此隔离 VM（原因见 §6.5.5 与 [rustmonitor-v2-architecture.md](rustmonitor-v2-architecture.md) §1.5）。**其核心思路是把本文前述的 "IOMMU 隔离 + 降级 OS 协同" 模式推广到 GPU 完整可信使用：GPU 驱动、kernel 加载、数据传输链路全程受控。以下内容依据 `docs/arch-images/` 中的 HyperGPU 分享材料（SecretFlow 团队，DataFun/数智大会）整理。
 
 #### 6.5.1 嵌套虚拟化部署形态：L0/L1/L2 三层
 
@@ -326,13 +326,13 @@ HyperGPU 采用三层结构（不同于本文主描述的 L0/L1 两层形态）�
 |---|---|---|---|---|
 | **L0** | HyperEnclave（Monitor Mode） | ✅ 可信 | 支持 eVMCS、CPU/内存隔离、设备保护 | ~13k LoC |
 | **L1** | 降级后的 Host Linux（含 KVM） | ❌ 不可信 | KVM、HyperEnclave Driver、cloud-hypervisor | 内核 ~2.7k LoC / cloud-hypervisor ~400 LoC |
-| **L2** | CVM（跑 TEE OS 与 App）与 Enclave VM | ✅ 可信负载 | td-shim（~100 LoC）、CVM-Linux（guest 内核 ~1.3k LoC） |
+| **L2** | 隔离 VM（跑 TEE OS 与 App）与 Enclave VM | ✅ 可信负载 | td-shim（~100 LoC）、CVM-Linux（guest 内核 ~1.3k LoC） |
 
-要点：降级后的 L1 Linux **仍可运行 KVM** 创建虚拟机——HyperEnclave 需提供 **eVMCS**（enlightened VMCS，KVM 嵌套虚拟化加速接口）使 L1 的 KVM 能高效运行 L2 虚拟机；L2 的 CVM 才是 GPU 的可信使用者。GPU-TEE 场景下 L2 内可运行密态大模型等负载。
+要点：降级后的 L1 Linux **仍可运行 KVM** 创建虚拟机——HyperEnclave 需提供 **eVMCS**（enlightened VMCS，KVM 嵌套虚拟化加速接口）使 L1 的 KVM 能高效运行 L2 虚拟机；L2 的隔离 VM 才是 GPU 的可信使用者。GPU-TEE 场景下 L2 内可运行密态大模型等负载。
 
 ![HyperGPU 整体设计架构](arch-images/hypergpu-design.png)
 
-上图给出整体设计架构：L2 CVM 内的 td-shim/CVM-Linux 与 GPU-TEE App 经由 L1 的 KVM/cloud-hypervisor 落在 L0 HyperEnclave 之上，GPU 经 IOMMU 设备页表与控制面管控接入可信域。
+上图给出整体设计架构：L2 隔离 VM 内的 td-shim/CVM-Linux 与 GPU-TEE App 经由 L1 的 KVM/cloud-hypervisor 落在 L0 HyperEnclave 之上，GPU 经 IOMMU 设备页表与控制面管控接入可信域。
 
 ![HyperGPU 具体实现与性能](arch-images/isolate.png)
 
@@ -342,10 +342,10 @@ HyperGPU 采用三层结构（不同于本文主描述的 L0/L1 两层形态）�
 
 HyperGPU 把 GPU 隔离拆为两个正交维度，均由 L0 仲裁：
 
-- **控制面保护**：通过页表与 Port I/O 控制，确保只有 GPU 关联的 CVM 能控制并正确管理 GPU 设备（PIO、MMCFG、PCIe 控制面、GPU BARs 均纳入管控）——这正对应本文 §6.3 的驱动协同路径，并叠加了 v2 设计中的 PIO 策略表机制。
-- **数据面保护**：通过 IOMMU 与设备页表（Device Page Table，位于 Root Complex）设置，确保 GPU 只能访问自己 CVM 的安全内存——即本文 §6.1/6.2 的 DMA 隔离机制按 CVM 粒度细化。
+- **控制面保护**：通过页表与 Port I/O 控制，确保只有 GPU 关联的隔离 VM 能控制并正确管理 GPU 设备（PIO、MMCFG、PCIe 控制面、GPU BARs 均纳入管控）——这正对应本文 §6.3 的驱动协同路径，并叠加了 v2 设计中的 PIO 策略表机制。
+- **数据面保护**：通过 IOMMU 与设备页表（Device Page Table，位于 Root Complex）设置，确保 GPU 只能访问自己隔离 VM 的安全内存——即本文 §6.1/6.2 的 DMA 隔离机制按隔离 VM 粒度细化。
 
-CVM-1 与 CVM-2 之间的安全内存共享也由 L0 通过设备页表仲裁。
+隔离 VM-1 与隔离 VM-2 之间的安全内存共享也由 L0 通过设备页表仲裁。
 
 #### 6.5.3 三层加密体系与 Kernel 加密
 
@@ -366,7 +366,7 @@ GPU 侧无内存加密硬件时，HyperGPU 用软件加密补齐链路安全，�
 ![国密合规能力](arch-images/cuda-crypto.png)
 
 - **链路加密**：SM4-CTR / SM4-GCM——CPU 侧由 C 函数、GPU 侧由 CUDA kernel 完成加解密，Memcpy 传密文。
-- **设备可信认证**：SM2（签名/加密）+ SM3（哈希）：CVM 通过 RA（远程证明）访问可信数据库比对设备型号指纹，认证过程包含签名公钥验证与密钥交换，防御中间人对挑战/指纹的篡改。
+- **设备可信认证**：SM2（签名/加密）+ SM3（哈希）：隔离 VM 通过 RA（远程证明）访问可信数据库比对设备型号指纹，认证过程包含签名公钥验证与密钥交换，防御中间人对挑战/指纹的篡改。
 
 #### 6.5.5 威胁模型
 
@@ -374,8 +374,8 @@ GPU 侧无内存加密硬件时，HyperGPU 用软件加密补齐链路安全，�
 
 | 类别 | 内容 |
 |---|---|
-| **可抵御（高特权软件攻击）** | 系统管理员越权；攻击者与恶意 CVM 合谋；恶意设备发起 DMA（CPU：L1 读写 CVM 寄存器；内存：L1 访问 CVM 安全内存；设备：恶意设备 DMA） |
-| **不考虑** | 硬件攻击（冷启动内存攻击、PCIe 链路窃听——**CVM 内存在 DRAM 中为明文**，无按域内存加密；链路窃听由 §6.5.3 应用层软件加密缓解）；侧信道攻击；DoS 攻击 |
+| **可抵御（高特权软件攻击）** | 系统管理员越权；攻击者与恶意隔离 VM 合谋；恶意设备发起 DMA（CPU：L1 读写隔离 VM 寄存器；内存：L1 访问隔离 VM 安全内存；设备：恶意设备 DMA） |
+| **不考虑** | 硬件攻击（冷启动内存攻击、PCIe 链路窃听——**隔离 VM 内存在 DRAM 中为明文**，无按域内存加密；链路窃听由 §6.5.3 应用层软件加密缓解）；侧信道攻击；DoS 攻击 |
 
 该威胁模型与 HyperEnclave 论文一致：L1 全不可信（含其上的 KVM），L0 与 L2 可信，恶意设备经 IOMMU 隔离——与本文 §6.1 的 DMA 隔离设计、v2 设计的 fail-closed 原则（[rustmonitor-v2-architecture.md](rustmonitor-v2-architecture.md) §1.4）同源。
 

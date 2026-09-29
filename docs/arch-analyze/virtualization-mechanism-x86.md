@@ -420,7 +420,7 @@ AMD SEV-SNP），核心都是把信任根从软件栈收回到 CPU + 内存加�
 hypervisor（VMX/SVM）+ 页表结构性隔离（EPT/NPT 挖洞）+ TPM 信任根**，在 Intel/AMD/Hygon/
 Zhaoxin 上提供统一的 SGX 兼容抽象——信任根从 CPU 解耦到 TPM，跨厂商可移植。
 
-> **与 TDX/SEV-SNP 域加密 CVM 的本质区别**：HyperEnclave 及其 GPU 扩展 HyperGPU 的「L2 CVM」形态，机密性**只来自软件页表隔离**（宿主软件读不到），**内存不加密、明文存于 DRAM**。它无法采用 TDX（MKTME KeyID）/ SEV-SNP（ASID）的域加密——① 二者均**不支持嵌套虚拟化**，而该形态是 L0 monitor + L1 KVM + L2 CVM 三层嵌套，与 TDX SEAM / SNP ASP 独占最高特权层互斥；② 软件栈**未调用 ASID/KeyID 按页加密**。故安全承诺止于「防宿主软件层」，不防物理 / 探针 / 冷启动。详见 `../rustmonitor-v2-architecture.md` §1.4–§1.5。
+> **与 TDX/SEV-SNP 域加密 CVM 的本质区别**：HyperEnclave 及其 GPU 扩展 HyperGPU 的「L2 隔离 VM」形态，机密性**只来自软件页表隔离**（宿主软件读不到），**内存不加密、明文存于 DRAM**。它无法采用 TDX（MKTME KeyID）/ SEV-SNP（ASID）的域加密——① 二者均**不支持嵌套虚拟化**，而该形态是 L0 monitor + L1 KVM + L2 隔离 VM 三层嵌套，与 TDX SEAM / SNP ASP 独占最高特权层互斥；② 软件栈**未调用 ASID/KeyID 按页加密**。故安全承诺止于「防宿主软件层」，不防物理 / 探针 / 冷启动。详见 `../rustmonitor-v2-architecture.md` §1.4–§1.5。
 
 <details open>
 <summary>📐 Mermaid 源图（点击展开 / 折叠）</summary>

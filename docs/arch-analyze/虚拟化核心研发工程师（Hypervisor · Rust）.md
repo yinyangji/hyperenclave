@@ -387,7 +387,7 @@ pub static MANAGER: &Manager = unsafe { core::mem::transmute(&EMPTY_BUFFER) };
 
 **I4.（2 分）为什么 IOMMU 是 GPU 隔离的必需而非可选？恶意设备 DMA 的攻击面是什么？**
 
-- 合格信号：设备可绕过 CPU 直接发起 DMA 访存，若仅靠 CPU 二级页表隔离而 GPU/设备 DMA 不受 IOMMU 约束，被隔离的 GPU 或恶意设备仍可 DMA 读写宿主或其他 VM 内存，摧毁隔离；IOMMU 对设备 DMA 做与 CPU 二级翻译同构的地址重映射，把 DMA 限定在授权域；对照 HyperGPU 威胁模型——可抵抗管理员提权、CVM 串通、恶意设备 DMA，前提正是 IOMMU 强制 \+ 二级页表结构性剥离
+- 合格信号：设备可绕过 CPU 直接发起 DMA 访存，若仅靠 CPU 二级页表隔离而 GPU/设备 DMA 不受 IOMMU 约束，被隔离的 GPU 或恶意设备仍可 DMA 读写宿主或其他 VM 内存，摧毁隔离；IOMMU 对设备 DMA 做与 CPU 二级翻译同构的地址重映射，把 DMA 限定在授权域；对照 HyperGPU 威胁模型——可抵抗管理员提权、隔离 VM 串通、恶意设备 DMA，前提正是 IOMMU 强制 \+ 二级页表结构性剥离
 
 - 警示信号：认为 CPU 二级页表隔离已足够（忽视 DMA 是独立攻击面）；不知道设备可绕过 CPU 访存
 
@@ -443,5 +443,5 @@ pub static MANAGER: &Manager = unsafe { core::mem::transmute(&EMPTY_BUFFER) };
 |二面|技术|90 分钟|维度 D/E/F/G/I（G 按候选人架构侧重选问，I 为 GPU 隔离核心必问），E3、F3、I2 必问（现场编码环境备好）|
 |三面|架构对话|60 分钟|给出现网约束（无 CPU/GPU 硬件 TEE、x86 双厂商与 ARM64 多平台、外置 FPGA 可信根），候选人阐述“如何把 GPU 从宿主系统强制隔离、仅授权特定 VM 独占直通”的完整设计——覆盖二级页表剥离、IOMMU/SMMU DMA 绑定、MSI-X 中断重映射、VM 切换时 GPU 复位与显存/BAR 回收清零、恶意设备 DMA 防护，考察设备隔离方法论、威胁建模与软硬协同设计能力|
 
-**三面评估要点**：GPU 隔离设计的正确路径应为——宿主二级页表与 IOMMU 视图均不含 GPU（结构性剥离，而非拦截宿主驱动调用）→ GPU MMIO/BAR 与 DMA 仅映射进授权 VM 的二级页表/SMMU Stage-2 → MSI-X 中断经中断重映射路由到该 VM → 设备归属唯一仲裁、绑定/解绑经 hypercall → VM 释放时先解除映射再 GPU FLR 复位、显存与共享页清零、IOTLB 失效 → 恶意设备 DMA 由 IOMMU 强制拦截（对照 HyperGPU 威胁模型：可抵抗管理员提权、CVM 串通、恶意设备 DMA）。跨架构与策略表侧：查架构规范（x86 SDM Vol.4 列 MSR 清单 / ARM ARM 列系统寄存器 trap 清单）→ 按内核实际访问集回归 → 分类定策略 → 生成架构对应的拦截配置 → 在 QEMU 与多架构实机环境验证；软硬协同侧能说明监控器度量如何接入外置 FPGA 可信根的证据链。只凭记忆和经验直接写表、或认为 CPU 二级页表隔离即可无视 DMA 攻击面的，记入风险备注。
+**三面评估要点**：GPU 隔离设计的正确路径应为——宿主二级页表与 IOMMU 视图均不含 GPU（结构性剥离，而非拦截宿主驱动调用）→ GPU MMIO/BAR 与 DMA 仅映射进授权 VM 的二级页表/SMMU Stage-2 → MSI-X 中断经中断重映射路由到该 VM → 设备归属唯一仲裁、绑定/解绑经 hypercall → VM 释放时先解除映射再 GPU FLR 复位、显存与共享页清零、IOTLB 失效 → 恶意设备 DMA 由 IOMMU 强制拦截（对照 HyperGPU 威胁模型：可抵抗管理员提权、隔离 VM 串通、恶意设备 DMA）。跨架构与策略表侧：查架构规范（x86 SDM Vol.4 列 MSR 清单 / ARM ARM 列系统寄存器 trap 清单）→ 按内核实际访问集回归 → 分类定策略 → 生成架构对应的拦截配置 → 在 QEMU 与多架构实机环境验证；软硬协同侧能说明监控器度量如何接入外置 FPGA 可信根的证据链。只凭记忆和经验直接写表、或认为 CPU 二级页表隔离即可无视 DMA 攻击面的，记入风险备注。
 
