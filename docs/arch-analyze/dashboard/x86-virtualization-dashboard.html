@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>x86 虚拟化机制 · 大屏看板</title>
+<style>
+:root{
+  --bg:#0a0e1a; --slide:#0b1120; --card:#0f1728; --card2:#0d1424;
+  --ink:#eaf1ff; --sub:#93a1c0; --dim:#5d6b8a; --line:#1c2740;
+  --cyan:#22d3ee; --green:#22c55e; --amber:#f5b301; --red:#f4506a; --blue:#3d8bfd; --violet:#a78bfa;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{background:var(--bg)}
+body{font-family:"PingFang SC","Microsoft YaHei","Noto Sans CJK SC",-apple-system,"Segoe UI",sans-serif;color:var(--ink);-webkit-font-smoothing:antialiased}
+.slide{width:1600px;min-height:900px;margin:0 auto 48px;padding:52px 64px 40px;position:relative;
+  background:radial-gradient(1200px 500px at 18% -10%,#12203c 0%,rgba(18,32,60,0) 60%),linear-gradient(180deg,#0c1424 0%,#0a0f1c 100%);
+  border:1px solid #16203a;border-radius:6px;overflow:hidden}
+.s-head{margin-bottom:14px}
+.s-title{font-size:42px;font-weight:800;letter-spacing:1px}
+.s-title .hl{color:var(--cyan);margin-left:14px}
+.s-sub{margin-top:10px;font-size:16px;color:var(--sub);letter-spacing:.5px}
+.s-rule{height:1px;background:linear-gradient(90deg,#243456,rgba(36,52,86,0));margin:20px 0 22px}
+.concl{display:flex;gap:16px;align-items:stretch;border:1px solid rgba(34,211,238,.45);border-left:4px solid var(--cyan);
+  background:linear-gradient(90deg,rgba(34,211,238,.10),rgba(34,211,238,.03));border-radius:6px;padding:16px 22px;margin-bottom:26px}
+.concl .lab{writing-mode:vertical-rl;font-size:13px;letter-spacing:4px;color:var(--cyan);border-right:1px solid rgba(34,211,238,.35);padding-right:12px;display:flex;align-items:center}
+.concl .txt{font-size:18px;line-height:1.75;color:var(--ink)}
+.concl .txt b{color:var(--cyan);font-weight:700}
+.concl .txt .w{color:#fff;font-weight:700}
+.cards{display:grid;gap:22px}
+.cards.c3{grid-template-columns:repeat(3,1fr)}
+.cards.c4{grid-template-columns:repeat(4,1fr)}
+.card{background:linear-gradient(180deg,var(--card),var(--card2));border:1px solid #18233c;border-radius:10px;padding:22px 22px 20px;position:relative;display:flex;flex-direction:column}
+.card::before{content:"";position:absolute;left:0;right:0;top:0;height:3px;border-radius:10px 10px 0 0}
+.card.g::before{background:linear-gradient(90deg,var(--green),rgba(34,197,94,0))}
+.card.b::before{background:linear-gradient(90deg,var(--blue),rgba(61,139,253,0))}
+.card.r::before{background:linear-gradient(90deg,var(--red),rgba(244,80,106,0))}
+.card.v::before{background:linear-gradient(90deg,var(--violet),rgba(167,139,250,0))}
+.c-head{display:flex;align-items:center;gap:10px}
+.dot{width:16px;height:16px;border-radius:50%;flex:0 0 auto}
+.card.g .dot{background:var(--green)} .card.b .dot{background:var(--blue)} .card.r .dot{background:var(--red)} .card.v .dot{background:var(--violet)}
+.c-title{font-size:21px;font-weight:800;letter-spacing:.5px}
+.c-en{margin:8px 0 4px;font-size:11px;letter-spacing:2.5px;color:var(--dim);text-transform:uppercase}
+.chain{display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:8px;margin:16px 0 18px;min-height:34px}
+.chip{font-size:14px;font-weight:700;padding:5px 10px;border-radius:4px;white-space:nowrap}
+.chip.g{background:rgba(34,197,94,.16);color:#7ef0a0;border:1px solid rgba(34,197,94,.55)}
+.chip.b{background:rgba(61,139,253,.16);color:#8fc0ff;border:1px solid rgba(61,139,253,.55)}
+.chip.y{background:rgba(245,179,1,.14);color:#ffd766;border:1px solid rgba(245,179,1,.55)}
+.chip.r{background:rgba(244,80,106,.14);color:#ff92a5;border:1px solid rgba(244,80,106,.55)}
+.arr{font-size:13px;color:var(--sub);white-space:nowrap}
+.pts{list-style:none;margin-top:2px}
+.pts li{position:relative;padding-left:22px;font-size:15.5px;line-height:1.7;color:#d7e1f5;margin-bottom:11px}
+.pts li::before{content:"▶";position:absolute;left:0;top:2px;font-size:11px}
+.card.g .pts li::before{color:var(--green)} .card.b .pts li::before{color:var(--blue)} .card.r .pts li::before{color:var(--red)} .card.v .pts li::before{color:var(--violet)}
+.pts li b{color:#fff}
+.pts li .cy{color:var(--cyan);font-weight:700}
+.tags{margin-top:auto;padding-top:16px;display:flex;flex-wrap:wrap;gap:10px}
+.tag{font-size:13px;font-weight:700;padding:6px 14px;border-radius:999px;white-space:nowrap}
+.tag.g{background:rgba(34,197,94,.15);color:#7ef0a0;border:1px solid rgba(34,197,94,.5)}
+.tag.b{background:rgba(61,139,253,.15);color:#8fc0ff;border:1px solid rgba(61,139,253,.5)}
+.tag.y{background:rgba(245,179,1,.13);color:#ffd766;border:1px solid rgba(245,179,1,.5)}
+.tag.r{background:rgba(244,80,106,.13);color:#ff92a5;border:1px solid rgba(244,80,106,.5)}
+.s-foot{position:absolute;left:64px;right:64px;bottom:26px;display:flex;justify-content:space-between;align-items:center;
+  border-top:1px solid var(--line);padding-top:14px;font-size:13px;color:var(--dim)}
+.s-foot .no{letter-spacing:1px}
+</style>
+</head>
+<body>
+
+<!-- ============ 屏 1：x86 虚拟化三大支柱 ============ -->
+<section class="slide" id="s1">
+  <div class="s-head">
+    <div class="s-title">x86 虚拟化机制<span class="hl">三大支柱</span></div>
+    <div class="s-sub">用硬件在 ring0 之上再造特权夹缝 —— Intel VMX root/non-root 与 AMD SVM host/guest</div>
+  </div>
+  <div class="s-rule"></div>
+  <div class="concl">
+    <div class="lab">核心结论</div>
+    <div class="txt">x86 原不满足 <span class="w">Popek-Goldberg</span> 可虚拟化条件（17 条敏感指令在 ring3 不 trap）；VT-x/SVM 引入比 ring0 更高的运行模式，敏感操作自动 <b>VM-Exit</b> 陷入仲裁。三大支柱：<span class="w">CPU 虚拟化 + 内存虚拟化 + IO/中断虚拟化</span>，缺一不可</div>
+  </div>
+  <div class="cards c3">
+    <div class="card b">
+      <div class="c-head"><span class="dot"></span><span class="c-title">Ⅰ CPU 虚拟化</span></div>
+      <div class="c-en">VMX / SVM</div>
+      <div class="chain"><span class="chip b">guest 敏感操作</span><span class="arr">→ VM-Exit →</span><span class="chip g">hypervisor 仲裁</span></div>
+      <ul class="pts">
+        <li>VMX <b>root/non-root</b> 双模式，VMCS 三区（guest/host/control）</li>
+        <li>VMLAUNCH/VMRESUME 进入，VMREAD/VMWRITE 读写字段</li>
+        <li>AMD SVM host/guest，<span class="cy">VMCB + VMRUN</span>，clean bits 加速</li>
+        <li>通用寄存器不自动保存，须入口汇编处理</li>
+      </ul>
+      <div class="tags"><span class="tag b">VMCS / VMCB</span><span class="tag y">exit reason</span></div>
+    </div>
+    <div class="card g">
+      <div class="c-head"><span class="dot"></span><span class="c-title">Ⅱ 内存虚拟化</span></div>
+      <div class="c-en">EPT / NPT</div>
+      <div class="chain"><span class="chip b">GVA</span><span class="arr">→ GPA →</span><span class="chip g">HPA</span></div>
+      <ul class="pts">
+        <li>两级翻译：guest 自管 Stage-1（GVA→GPA）</li>
+        <li>hypervisor 管 <span class="cy">EPT/NPT</span>（GPA→HPA）</li>
+        <li>violation/fault → VM-Exit 惰性建映射</li>
+        <li>替代影子页表，2MB/1GB 大页提速</li>
+      </ul>
+      <div class="tags"><span class="tag g">EPTP / nCR3</span><span class="tag b">INVEPT/INVLPGA</span></div>
+    </div>
+    <div class="card v">
+      <div class="c-head"><span class="dot"></span><span class="c-title">Ⅲ IO / 中断虚拟化</span></div>
+      <div class="c-en">VT-d / APICv</div>
+      <div class="chain"><span class="chip b">设备 DMA</span><span class="arr">→ VT-d/AMD-Vi →</span><span class="chip g">HPA</span></div>
+      <ul class="pts">
+        <li>VT-d/AMD-Vi <b>DMA 重映射</b>，设备直通隔离</li>
+        <li>APICv/AVIC 虚拟 APIC，guest 访问免 exit</li>
+        <li><span class="cy">posted interrupt</span> 中断直投 vCPU</li>
+        <li>IO bitmap 选择性拦截敏感端口</li>
+      </ul>
+      <div class="tags"><span class="tag g">posted interrupt</span><span class="tag b">SR-IOV</span></div>
+    </div>
+  </div>
+  <div class="s-foot"><span>一句话：CPU 拦截 + 二级翻译 + DMA 隔离，三支柱共同支撑 x86 虚拟化</span><span class="no">图 1 · 核心模型</span></div>
+</section>
+
+<!-- ============ 屏 2：VM-Exit 生命周期 ============ -->
+<section class="slide" id="s2">
+  <div class="s-head">
+    <div class="s-title">VM-Exit 生命周期<span class="hl">陷入—仲裁—恢复</span></div>
+    <div class="s-sub">一次敏感操作如何从 guest 陷入 hypervisor 再返回 —— 硬件与软件的分工边界</div>
+  </div>
+  <div class="s-rule"></div>
+  <div class="concl">
+    <div class="lab">核心结论</div>
+    <div class="txt">VM-Exit 时硬件保存 guest-state 到 VMCS、加载 host-state，但<span class="w">通用寄存器 RAX–R15 与浮点状态须软件入口汇编保存</span>；按 exit reason 分发仲裁后 VMRESUME 重入 —— 这正是 VMX hypervisor 入口用 <b>naked function</b> 手写保存协议的根本原因</div>
+  </div>
+  <div class="cards c3">
+    <div class="card b">
+      <div class="c-head"><span class="dot"></span><span class="c-title">① 陷入 · 保存</span></div>
+      <div class="c-en">VM-Exit</div>
+      <div class="chain"><span class="chip b">敏感指令/事件</span><span class="arr">→ 硬件切换 →</span><span class="chip g">host RIP</span></div>
+      <ul class="pts">
+        <li>硬件保存 guest-state（RIP/RSP/CR/段）到 VMCS</li>
+        <li>加载 host-state，置 <span class="cy">exit reason + qualification</span></li>
+        <li>软件入口汇编 push RAX–R15、切 host 栈</li>
+        <li>AMD：#VMEXIT 保存 VMCB save 区</li>
+      </ul>
+      <div class="tags"><span class="tag b">硬件保存控制状态</span></div>
+    </div>
+    <div class="card g">
+      <div class="c-head"><span class="dot"></span><span class="c-title">② 分发 · 仲裁</span></div>
+      <div class="c-en">Dispatch</div>
+      <div class="chain"><span class="chip b">exit reason</span><span class="arr">→ handler →</span><span class="chip g">更新 guest-state</span></div>
+      <ul class="pts">
+        <li>按 reason 分发：CPUID(10)/VMCALL(18)/IO(30)</li>
+        <li>MSR(31,32)、<span class="cy">EPT violation(48)</span>、外部中断(1)</li>
+        <li>仲裁：模拟指令语义 / 注入异常 / 建映射</li>
+        <li>advance RIP 或回退（#GP 不前进）</li>
+      </ul>
+      <div class="tags"><span class="tag g">vmexit_handler</span></div>
+    </div>
+    <div class="card v">
+      <div class="c-head"><span class="dot"></span><span class="c-title">③ 恢复 · 重入</span></div>
+      <div class="c-en">VM-Entry</div>
+      <div class="chain"><span class="chip b">pop RAX–R15</span><span class="arr">→ VMRESUME →</span><span class="chip g">guest 续跑</span></div>
+      <ul class="pts">
+        <li>软件恢复通用寄存器现场</li>
+        <li>硬件保存 host-state、加载 guest-state</li>
+        <li>执行 <span class="cy">VM-entry MSR load</span> area</li>
+        <li>guest 从更新后的 RIP 继续执行</li>
+      </ul>
+      <div class="tags"><span class="tag b">VMRESUME / VMRUN</span></div>
+    </div>
+  </div>
+  <div class="s-foot"><span>一句话：硬件管控制状态，软件管通用寄存器 —— 分工边界即入口汇编</span><span class="no">图 2 · VM-Exit 生命周期</span></div>
+</section>
+
+<!-- ============ 屏 3：关键子系统与机密计算 ============ -->
+<section class="slide" id="s3">
+  <div class="s-head">
+    <div class="s-title">关键子系统<span class="hl">翻译 · 中断 · DMA · 机密计算</span></div>
+    <div class="s-sub">支撑隔离与性能的四大子系统，以及机密计算如何把信任根收回硬件</div>
+  </div>
+  <div class="s-rule"></div>
+  <div class="concl">
+    <div class="lab">核心结论</div>
+    <div class="txt">二级翻译消除影子页表、APICv/posted interrupt 消除中断 exit、VT-d 隔离设备 DMA；机密计算（SGX/TDX/SEV-SNP）把信任根收回 <span class="w">CPU + 内存加密引擎</span>，而 <b>HyperEnclave 解耦到 TPM</b> 实现跨厂商可移植</div>
+  </div>
+  <div class="cards c4">
+    <div class="card b">
+      <div class="c-head"><span class="dot"></span><span class="c-title">二级翻译</span></div>
+      <div class="c-en">EPT / NPT</div>
+      <ul class="pts">
+        <li>GVA→GPA→HPA 两级 walk</li>
+        <li>violation 携带 <span class="cy">GPA + 访问类型</span></li>
+        <li>INVEPT 单/全上下文失效</li>
+        <li>大页减少 TLB 压力</li>
+      </ul>
+      <div class="tags"><span class="tag b">SLAT</span></div>
+    </div>
+    <div class="card g">
+      <div class="c-head"><span class="dot"></span><span class="c-title">中断虚拟化</span></div>
+      <div class="c-en">APICv / AVIC</div>
+      <ul class="pts">
+        <li>virtual-APIC page，访问免 exit</li>
+        <li>虚拟中断硬件投递</li>
+        <li><span class="cy">posted interrupt</span> 直投 vCPU</li>
+        <li>AMD AVIC + GA log</li>
+      </ul>
+      <div class="tags"><span class="tag g">免 exit</span></div>
+    </div>
+    <div class="card v">
+      <div class="c-head"><span class="dot"></span><span class="c-title">DMA 隔离</span></div>
+      <div class="c-en">VT-d / AMD-Vi</div>
+      <ul class="pts">
+        <li>root/context entry → 设备 IO 页表</li>
+        <li>设备 DMA 翻译到 HPA</li>
+        <li>中断重映射配合 posted intr</li>
+        <li>须与 <span class="cy">CPU 二级翻译一致</span></li>
+      </ul>
+      <div class="tags"><span class="tag b">设备直通</span></div>
+    </div>
+    <div class="card r">
+      <div class="c-head"><span class="dot"></span><span class="c-title">机密计算</span></div>
+      <div class="c-en">SGX/TDX/SEV</div>
+      <ul class="pts">
+        <li>SGX 进程 enclave + EPC</li>
+        <li>TDX TD 虚机 + SEAM + MKTME</li>
+        <li>SEV-SNP CVM + RMP</li>
+        <li><span class="cy">HyperEnclave</span>：软件 + TPM RoT</li>
+      </ul>
+      <div class="tags"><span class="tag r">信任根</span></div>
+    </div>
+  </div>
+  <div class="s-foot"><span>一句话：隔离靠二级翻译 + DMA 重映射，信任根决定可移植性</span><span class="no">图 3 · 关键子系统</span></div>
+</section>
+
+</body>
+</html>

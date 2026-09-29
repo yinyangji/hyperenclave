@@ -303,17 +303,18 @@ GPU 驱动运行于 L1 Host（Primary OS）的 Normal Mode：
 3. **GPU 的 DMA 访问**受 IOMMU 约束——RustMonitor 在启动时配置 IOMMU 页表，仅允许 GPU 访问非安全物理内存。
 4. 当 Host 需要 GPU 访问 Enclave 数据时，数据需通过 marshalling buffer 传递，RustMonitor 可选择性地临时映射特定页面到 IO Page Table。
 
-### 6.4 内存加密支持
+### 6.4 内存加密支持（SME/TSME，非 CVM 域加密）
 
-在 AMD 平台上，RustMonitor 支持 **SME（Secure Memory Encryption）**：
+在 AMD 平台上，RustMonitor 适配 **SME（Secure Memory Encryption）**，但须厘清其语义边界：
 
-- EPC 内存和 hypervisor 内存以加密标记映射（`MemFlags::ENCRYPTED`）。
-- 在 GPM 中，加密地址空间（C-bit = 1）的 EPC 区域也被映射为空页面，防止 Host 通过加密视图读取安全数据。
+- 这里依赖的是 **TSME（透明全内存加密，单一密钥）**——它加密整机内存，**不按 VM/enclave 域分配独立密钥**，因此**不构成 TDX/SEV-SNP 那样的域加密**，也挡不住同样运行在该密钥下的 L1 宿主软件读取内存。
+- SME 在本方案中的作用是**堵加密视图旁路**：EPC 内存和 hypervisor 内存以加密标记映射（`MemFlags::ENCRYPTED`）；在 GPM 中，加密地址空间（C-bit = 1）的 EPC 区域同样被映射为空页面，防止 Host 通过“加密别名地址”绕过挖洞读取安全数据。
 - IOMMU 和 Host 页表均支持加密/非加密视图的隔离。
+- **结论**：CVM/Enclave 的机密性主防线始终是 §6.1–§6.3 的**页表结构性隔离（软件隔离）**；SME 仅为纵深防御一环，不改变“无按域内存加密、DRAM 中数据对物理攻击者为明文”的边界。
 
 ### 6.5 HyperGPU：GPU TEE 扩展形态
 
-HyperGPU 是 HyperEnclave 面向 GPU 机密计算（密态大模型等场景）的扩展形态，提供 Enclave、CVM（Confidential VM）、GPU-TEE 三层抽象。其核心思路是把本文前述的 "IOMMU 隔离 + 降级 OS 协同" 模式推广到 GPU 完整可信使用：GPU 驱动、kernel 加载、数据传输链路全程受控。以下内容依据 `docs/arch-images/` 中的 HyperGPU 分享材料（SecretFlow 团队，DataFun/数智大会）整理。
+HyperGPU 是 HyperEnclave 面向 GPU 机密计算（密态大模型等场景）的扩展形态，提供 Enclave、CVM、GPU-TEE 三层抽象。**术语澄清：本文的 CVM 指由 L0 HyperEnclave 软件隔离的「受保护隔离虚拟机」——机密性来自二级页表结构性隔离（宿主软件不可达）、内存明文存于 DRAM，并非 Intel TDX / AMD SEV-SNP 那种以硬件内存加密为前提的标准 Confidential VM（原因见 §6.5.5 与 [rustmonitor-v2-architecture.md](rustmonitor-v2-architecture.md) §1.5）。**其核心思路是把本文前述的 "IOMMU 隔离 + 降级 OS 协同" 模式推广到 GPU 完整可信使用：GPU 驱动、kernel 加载、数据传输链路全程受控。以下内容依据 `docs/arch-images/` 中的 HyperGPU 分享材料（SecretFlow 团队，DataFun/数智大会）整理。
 
 #### 6.5.1 嵌套虚拟化部署形态：L0/L1/L2 三层
 
@@ -374,7 +375,7 @@ GPU 侧无内存加密硬件时，HyperGPU 用软件加密补齐链路安全，�
 | 类别 | 内容 |
 |---|---|
 | **可抵御（高特权软件攻击）** | 系统管理员越权；攻击者与恶意 CVM 合谋；恶意设备发起 DMA（CPU：L1 读写 CVM 寄存器；内存：L1 访问 CVM 安全内存；设备：恶意设备 DMA） |
-| **不考虑** | 硬件攻击（冷启动可用内存加密抵御；PCIe 链路窃听可用端到端加密抵御）；侧信道攻击；DoS 攻击 |
+| **不考虑** | 硬件攻击（冷启动内存攻击、PCIe 链路窃听——**CVM 内存在 DRAM 中为明文**，无按域内存加密；链路窃听由 §6.5.3 应用层软件加密缓解）；侧信道攻击；DoS 攻击 |
 
 该威胁模型与 HyperEnclave 论文一致：L1 全不可信（含其上的 KVM），L0 与 L2 可信，恶意设备经 IOMMU 隔离——与本文 §6.1 的 DMA 隔离设计、v2 设计的 fail-closed 原则（[rustmonitor-v2-architecture.md](rustmonitor-v2-architecture.md) §1.4）同源。
 

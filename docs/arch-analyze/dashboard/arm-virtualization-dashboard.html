@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ARM 虚拟化机制 · 大屏看板</title>
+<style>
+:root{
+  --bg:#0a0e1a; --slide:#0b1120; --card:#0f1728; --card2:#0d1424;
+  --ink:#eaf1ff; --sub:#93a1c0; --dim:#5d6b8a; --line:#1c2740;
+  --cyan:#22d3ee; --green:#22c55e; --amber:#f5b301; --red:#f4506a; --blue:#3d8bfd; --violet:#a78bfa;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{background:var(--bg)}
+body{font-family:"PingFang SC","Microsoft YaHei","Noto Sans CJK SC",-apple-system,"Segoe UI",sans-serif;color:var(--ink);-webkit-font-smoothing:antialiased}
+.slide{width:1600px;min-height:900px;margin:0 auto 48px;padding:52px 64px 40px;position:relative;
+  background:radial-gradient(1200px 500px at 18% -10%,#12203c 0%,rgba(18,32,60,0) 60%),linear-gradient(180deg,#0c1424 0%,#0a0f1c 100%);
+  border:1px solid #16203a;border-radius:6px;overflow:hidden}
+.s-head{margin-bottom:14px}
+.s-title{font-size:42px;font-weight:800;letter-spacing:1px}
+.s-title .hl{color:var(--cyan);margin-left:14px}
+.s-sub{margin-top:10px;font-size:16px;color:var(--sub);letter-spacing:.5px}
+.s-rule{height:1px;background:linear-gradient(90deg,#243456,rgba(36,52,86,0));margin:20px 0 22px}
+.concl{display:flex;gap:16px;align-items:stretch;border:1px solid rgba(34,211,238,.45);border-left:4px solid var(--cyan);
+  background:linear-gradient(90deg,rgba(34,211,238,.10),rgba(34,211,238,.03));border-radius:6px;padding:16px 22px;margin-bottom:26px}
+.concl .lab{writing-mode:vertical-rl;font-size:13px;letter-spacing:4px;color:var(--cyan);border-right:1px solid rgba(34,211,238,.35);padding-right:12px;display:flex;align-items:center}
+.concl .txt{font-size:18px;line-height:1.75;color:var(--ink)}
+.concl .txt b{color:var(--cyan);font-weight:700}
+.concl .txt .w{color:#fff;font-weight:700}
+.cards{display:grid;gap:22px}
+.cards.c3{grid-template-columns:repeat(3,1fr)}
+.cards.c4{grid-template-columns:repeat(4,1fr)}
+.card{background:linear-gradient(180deg,var(--card),var(--card2));border:1px solid #18233c;border-radius:10px;padding:22px 22px 20px;position:relative;display:flex;flex-direction:column}
+.card::before{content:"";position:absolute;left:0;right:0;top:0;height:3px;border-radius:10px 10px 0 0}
+.card.g::before{background:linear-gradient(90deg,var(--green),rgba(34,197,94,0))}
+.card.b::before{background:linear-gradient(90deg,var(--blue),rgba(61,139,253,0))}
+.card.r::before{background:linear-gradient(90deg,var(--red),rgba(244,80,106,0))}
+.card.v::before{background:linear-gradient(90deg,var(--violet),rgba(167,139,250,0))}
+.c-head{display:flex;align-items:center;gap:10px}
+.dot{width:16px;height:16px;border-radius:50%;flex:0 0 auto}
+.card.g .dot{background:var(--green)} .card.b .dot{background:var(--blue)} .card.r .dot{background:var(--red)} .card.v .dot{background:var(--violet)}
+.c-title{font-size:21px;font-weight:800;letter-spacing:.5px}
+.c-en{margin:8px 0 4px;font-size:11px;letter-spacing:2.5px;color:var(--dim);text-transform:uppercase}
+.chain{display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:8px;margin:16px 0 18px;min-height:34px}
+.chip{font-size:14px;font-weight:700;padding:5px 10px;border-radius:4px;white-space:nowrap}
+.chip.g{background:rgba(34,197,94,.16);color:#7ef0a0;border:1px solid rgba(34,197,94,.55)}
+.chip.b{background:rgba(61,139,253,.16);color:#8fc0ff;border:1px solid rgba(61,139,253,.55)}
+.chip.y{background:rgba(245,179,1,.14);color:#ffd766;border:1px solid rgba(245,179,1,.55)}
+.chip.r{background:rgba(244,80,106,.14);color:#ff92a5;border:1px solid rgba(244,80,106,.55)}
+.arr{font-size:13px;color:var(--sub);white-space:nowrap}
+.pts{list-style:none;margin-top:2px}
+.pts li{position:relative;padding-left:22px;font-size:15.5px;line-height:1.7;color:#d7e1f5;margin-bottom:11px}
+.pts li::before{content:"▶";position:absolute;left:0;top:2px;font-size:11px}
+.card.g .pts li::before{color:var(--green)} .card.b .pts li::before{color:var(--blue)} .card.r .pts li::before{color:var(--red)} .card.v .pts li::before{color:var(--violet)}
+.pts li b{color:#fff}
+.pts li .cy{color:var(--cyan);font-weight:700}
+.tags{margin-top:auto;padding-top:16px;display:flex;flex-wrap:wrap;gap:10px}
+.tag{font-size:13px;font-weight:700;padding:6px 14px;border-radius:999px;white-space:nowrap}
+.tag.g{background:rgba(34,197,94,.15);color:#7ef0a0;border:1px solid rgba(34,197,94,.5)}
+.tag.b{background:rgba(61,139,253,.15);color:#8fc0ff;border:1px solid rgba(61,139,253,.5)}
+.tag.y{background:rgba(245,179,1,.13);color:#ffd766;border:1px solid rgba(245,179,1,.5)}
+.tag.r{background:rgba(244,80,106,.13);color:#ff92a5;border:1px solid rgba(244,80,106,.5)}
+.s-foot{position:absolute;left:64px;right:64px;bottom:26px;display:flex;justify-content:space-between;align-items:center;
+  border-top:1px solid var(--line);padding-top:14px;font-size:13px;color:var(--dim)}
+.s-foot .no{letter-spacing:1px}
+</style>
+</head>
+<body>
+
+<!-- ============ 屏 1：ARM 异常级别与 EL2 ============ -->
+<section class="slide" id="s1">
+  <div class="s-head">
+    <div class="s-title">ARM 虚拟化机制<span class="hl">异常级别 EL2</span></div>
+    <div class="s-sub">在 EL0–EL3 体系里专设 EL2 给 hypervisor —— trap + Stage-2，而非独立运行模式</div>
+  </div>
+  <div class="s-rule"></div>
+  <div class="concl">
+    <div class="lab">核心结论</div>
+    <div class="txt">ARM 用<span class="w">异常级别</span>表达特权：EL2 专给 hypervisor，宿主/guest 跑 EL1/EL0，敏感操作经 <b>trap</b> 陷入 EL2；VHE 让宿主内核直接跑 EL2 化身 hypervisor。与 x86 root/non-root 正交模式不同，ARM <span class="w">复用统一异常机制</span></div>
+  </div>
+  <div class="cards c3">
+    <div class="card b">
+      <div class="c-head"><span class="dot"></span><span class="c-title">Ⅰ 异常级别模型</span></div>
+      <div class="c-en">EL0 – EL3</div>
+      <div class="chain"><span class="chip b">EL0/EL1 guest</span><span class="arr">→ trap →</span><span class="chip g">EL2 hypervisor</span></div>
+      <ul class="pts">
+        <li>EL0 用户、EL1 OS 内核、<b>EL2 hypervisor</b>、EL3 Secure Monitor(ATF)</li>
+        <li>安全状态：Non-secure/Secure（ARMv9 加 <span class="cy">Realm/Root</span> 四世界）</li>
+        <li>异常进入置 ELR_EL2/SPSR_EL2，跳 VBAR_EL2 向量</li>
+        <li>敏感操作以同步异常 trap 到 EL2</li>
+      </ul>
+      <div class="tags"><span class="tag b">EL2 专用</span><span class="tag y">VBAR_EL2</span></div>
+    </div>
+    <div class="card g">
+      <div class="c-head"><span class="dot"></span><span class="c-title">Ⅱ VHE 执行模型</span></div>
+      <div class="c-en">Virtualization Host Ext</div>
+      <div class="chain"><span class="chip b">宿主内核</span><span class="arr">→ E2H=1 →</span><span class="chip g">直接跑 EL2</span></div>
+      <ul class="pts">
+        <li>non-VHE：宿主 EL1、hypervisor EL2，切换频繁</li>
+        <li>VHE（ARMv8.1）：<span class="cy">HCR_EL2.E2H=1</span>，宿主内核即 EL2</li>
+        <li>Linux KVM 默认 VHE，消除 EL1↔EL2 开销</li>
+        <li>host 内核可<b>就是</b> hypervisor 本身</li>
+      </ul>
+      <div class="tags"><span class="tag g">EL2&amp;0 regime</span></div>
+    </div>
+    <div class="card v">
+      <div class="c-head"><span class="dot"></span><span class="c-title">Ⅲ 关键 EL2 寄存器</span></div>
+      <div class="c-en">Control Registers</div>
+      <div class="chain"><span class="chip b">HCR_EL2</span><span class="arr">→ trap 控制 →</span><span class="chip g">ESR_EL2</span></div>
+      <ul class="pts">
+        <li><b>HCR_EL2</b>：trap 控制 + Stage-2 使能 + E2H</li>
+        <li><span class="cy">VTTBR_EL2</span>：Stage-2 基址 + VMID</li>
+        <li>ESR_EL2：异常综合（EC + ISS）</li>
+        <li>HPFAR_EL2：故障 IPA（&gt;&gt;4）</li>
+      </ul>
+      <div class="tags"><span class="tag b">ESR_EL2.EC</span><span class="tag y">HPFAR_EL2</span></div>
+    </div>
+  </div>
+  <div class="s-foot"><span>一句话：ARM 把虚拟化嵌进统一异常级别，EL2 即枢纽</span><span class="no">图 1 · 特权模型</span></div>
+</section>
+
+<!-- ============ 屏 2：trap 到 EL2 生命周期 ============ -->
+<section class="slide" id="s2">
+  <div class="s-head">
+    <div class="s-title">trap 到 EL2 生命周期<span class="hl">陷入—仲裁—返回</span></div>
+    <div class="s-sub">guest 敏感操作如何经同步异常陷入 EL2 再 ERET 返回 —— ESR_EL2.EC 标识原因</div>
+  </div>
+  <div class="s-rule"></div>
+  <div class="concl">
+    <div class="lab">核心结论</div>
+    <div class="txt">guest 命中 HCR_EL2/CPTR_EL2 trap 位或 Stage-2 fault，硬件保存 ELR_EL2/SPSR_EL2、置 <span class="w">ESR_EL2（EC+ISS）</span>、FAR/HPFAR，跳 VBAR_EL2；软件保存通用寄存器、按 EC 分发仲裁，<b>ERET</b> 返回 —— 与 x86 一样<span class="w">不自动保存通用寄存器</span></div>
+  </div>
+  <div class="cards c3">
+    <div class="card b">
+      <div class="c-head"><span class="dot"></span><span class="c-title">① trap · 保存</span></div>
+      <div class="c-en">Exception to EL2</div>
+      <div class="chain"><span class="chip b">敏感操作/fault</span><span class="arr">→ 硬件 →</span><span class="chip g">VBAR_EL2</span></div>
+      <ul class="pts">
+        <li>命中 HCR_EL2/CPTR_EL2 trap 位或 Stage-2 fault</li>
+        <li>硬件保存 <span class="cy">ELR_EL2/SPSR_EL2</span></li>
+        <li>置 ESR_EL2（EC+ISS）、FAR_EL2/HPFAR_EL2</li>
+        <li>软件入口保存 guest 通用寄存器</li>
+      </ul>
+      <div class="tags"><span class="tag b">ESR_EL2.EC</span></div>
+    </div>
+    <div class="card g">
+      <div class="c-head"><span class="dot"></span><span class="c-title">② 分发 · 仲裁</span></div>
+      <div class="c-en">Dispatch by EC</div>
+      <div class="chain"><span class="chip b">EC</span><span class="arr">→ handler →</span><span class="chip g">仿真/建映射</span></div>
+      <ul class="pts">
+        <li>EC=0x16 <span class="cy">HVC</span>（hypercall）</li>
+        <li>EC=0x24/0x20 Data/Instruction Abort</li>
+        <li>EC=0x18 MSR/MRS 系统寄存器访问</li>
+        <li>仲裁：仿真寄存器 / 处理 Stage-2 fault / 转发</li>
+      </ul>
+      <div class="tags"><span class="tag g">HVC · Data Abort</span></div>
+    </div>
+    <div class="card v">
+      <div class="c-head"><span class="dot"></span><span class="c-title">③ 返回 · 续跑</span></div>
+      <div class="c-en">ERET</div>
+      <div class="chain"><span class="chip b">恢复通用寄存器</span><span class="arr">→ ERET →</span><span class="chip g">guest 续跑</span></div>
+      <ul class="pts">
+        <li>软件恢复 guest 通用寄存器现场</li>
+        <li><span class="cy">ERET</span> 恢复 ELR_EL2/SPSR_EL2</li>
+        <li>回到 guest EL1/EL0 续跑</li>
+        <li>对照 x86 VMRESUME 重入</li>
+      </ul>
+      <div class="tags"><span class="tag b">ERET</span></div>
+    </div>
+  </div>
+  <div class="s-foot"><span>一句话：x86 看 exit reason，ARM 读 ESR_EL2.EC —— 同构的陷入仲裁</span><span class="no">图 2 · trap 生命周期</span></div>
+</section>
+
+<!-- ============ 屏 3：关键子系统与 CCA ============ -->
+<section class="slide" id="s3">
+  <div class="s-head">
+    <div class="s-title">关键子系统<span class="hl">翻译 · 中断 · DMA · 机密计算</span></div>
+    <div class="s-sub">Stage-2 二级翻译、GICv3/v4 中断、SMMU DMA 隔离，与 ARM CCA 四世界机密计算</div>
+  </div>
+  <div class="s-rule"></div>
+  <div class="concl">
+    <div class="lab">核心结论</div>
+    <div class="txt">Stage-1/2 与 x86 EPT/NPT <span class="w">同构</span>；GICv3/v4 + List Register + vLPI 直投完成中断虚拟化；SMMUv3 隔离设备 DMA；ARM CCA 用<b>四世界 + GPT + RMM</b> 提供虚机级机密计算</div>
+  </div>
+  <div class="cards c4">
+    <div class="card b">
+      <div class="c-head"><span class="dot"></span><span class="c-title">二级翻译</span></div>
+      <div class="c-en">Stage-1 / Stage-2</div>
+      <ul class="pts">
+        <li>Stage-1 VA→IPA（guest 管 TTBR_EL1）</li>
+        <li>Stage-2 IPA→PA（<span class="cy">VTTBR_EL2+VMID</span>）</li>
+        <li>fault 读 HPFAR_EL2(IPA)+ESR(类型)</li>
+        <li>TLBI 失效（VMALLS12E1/IPAS2E1）</li>
+      </ul>
+      <div class="tags"><span class="tag b">VMID</span></div>
+    </div>
+    <div class="card g">
+      <div class="c-head"><span class="dot"></span><span class="c-title">中断虚拟化</span></div>
+      <div class="c-en">GICv3 / v4</div>
+      <ul class="pts">
+        <li>Distributor/Redistributor/ITS</li>
+        <li><span class="cy">List Register(ICH_LR)</span> 注入</li>
+        <li>maintenance interrupt 同步 LR</li>
+        <li>GICv4 vLPI 直投免 trap</li>
+      </ul>
+      <div class="tags"><span class="tag g">vGIC</span></div>
+    </div>
+    <div class="card v">
+      <div class="c-head"><span class="dot"></span><span class="c-title">DMA 隔离</span></div>
+      <div class="c-en">SMMUv3</div>
+      <ul class="pts">
+        <li>StreamID/SubstreamID 索引设备</li>
+        <li>SMMU Stage-2 翻译设备 DMA</li>
+        <li>须与 <span class="cy">CPU Stage-2 一致</span></li>
+        <li>命令队列 / 事件队列</li>
+      </ul>
+      <div class="tags"><span class="tag b">设备直通</span></div>
+    </div>
+    <div class="card r">
+      <div class="c-head"><span class="dot"></span><span class="c-title">机密计算</span></div>
+      <div class="c-en">CCA / Realm</div>
+      <ul class="pts">
+        <li>ARMv9 RME <span class="cy">四世界</span></li>
+        <li>Realm 机密虚机 + RMM</li>
+        <li>GPT 页归属（EL3 强制）</li>
+        <li>Realm 内存对 Normal 不可见</li>
+      </ul>
+      <div class="tags"><span class="tag r">信任根</span></div>
+    </div>
+  </div>
+  <div class="s-foot"><span>一句话：Stage-2 + SMMU 隔离，CCA 四世界护密</span><span class="no">图 3 · 关键子系统</span></div>
+</section>
+
+</body>
+</html>
