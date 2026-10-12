@@ -35,9 +35,16 @@
 | G12 | 测试 | 3 个单元测试 | P1 | §11 ✅ 单元测试扩至 AMD 21 / Intel 22 | 
 | G13 | VT-d cache line 硬编码 64B（[intel/vtd.rs:415](../src/arch/x86_64/intel/vtd.rs#L415)） | P2 | 读 CAP 寄存器 | |
 | G14 | libtpm.a 闭源 | 二进制依赖，无法重建 | — | 架构范围外，fake TPM 兑底 |
-| G15 | 嵌套虚拟化支持（eVMCS） | HyperGPU 形态的硬依赖：L1 降级 Linux 需跑 KVM 创建 L2 隔离 VM，L0 需提供 enlightened VMCS 加速；当前代码库未见 eVMCS 实现（VMCS 操作为直接 vmptrld/vmwrite） | **P1** | 见架构文档 §1.5；需评估对 libvmm vmcs 层的扩展（VMCS shadowing + eVMCS 区域） |
+| G15 | 嵌套虚拟化支持（eVMCS） | HyperGPU 形态的硬依赖：L1 降级 Linux 需跑 KVM 创建 L2 隔离 VM，L0 需提供 enlightened VMCS 加速；当前代码库未见 eVMCS 实现（VMCS 操作为直接 vmptrld/vmwrite） | **P1** | **设计完成（2026-10）**：见 [nested-vmx-design.md](nested-vmx-design.md)（Intel VMX 限定，C1–C6 六机制 + 里程碑 M1–M5）；实现分里程碑进行，`feature=nested` 默认关闭（off = 现状逐位一致） |
 
 **不在 v2 范围**（v2 架构文档 §6 已定）：SMM 模拟、S3 真睡眠（明确拒绝）、多分区/多 VM、libtpm 重写。注：G15 的嵌套虚拟化仅在其依赖 HyperGPU 隔离 VM 形态部署时需要，与“多分区不实现”不矛盾——L1 KVM 自身可在现有双页表体系上运行，eVMCS 是性能优化项兼 HyperGPU 前置项。
+
+### 0.3 落地登记（2026-10 增补，位于 PR 序列之外）
+
+| 模块 | 内容 | 状态 | 设计文档 |
+|---|---|---|---|
+| 设备/GPU 隔离（`src/device/`） | monitor 先于 host 枚举 PCI 总线，三信号分类器（class + vendor 白名单 + 最大 BAR ≥ 256MB）识别独立加速卡；控制面 GPM 挖洞 + all-ones sinkhole + ECAM 配置页摘除；数据面每设备独立 IOMMU 域（空表 fail-closed）；构建期覆盖 `HE_PROTECT_BDF` / `HE_EXCLUDE_BDF`（exclude 优先，解析失败 fail 构建）；`assign`/`release` 协议已实现但尚无 hypercall 调用方（为隔离 VM 预留） | ✅ 已落地（含单测） | [device-isolation-design.md](device-isolation-design.md) |
+| 0xCF8/0xCFC 配置端口拦截 | PIO 策略扩展：guest 写 0xCF8 按 CPU 记录 CONFIG_ADDRESS，0xCFC–0xCFF 访问按 `pci_cfg::decode_config_address` 解析目标 BDF——受保护设备读返全 1 / 写丢弃，其余真实直通。代价：guest 全部 legacy 配置周期此后 trap | ✅ 已落地 | 同上 §2.1 |
 
 ---
 

@@ -150,7 +150,7 @@ v2 的 fail-closed 默认、拦截面选择与验证范围均以下述威胁模�
 - **L1** = 降级后的 Host Linux（不可信），内含 KVM + HyperEnclave Driver + cloud-hypervisor；
 - **L2** = 隔离 VM（跑 TEE OS/App，可信负载）与 Enclave VM，GPU-TEE 场景下运行密态大模型。
 
-这证明两件事：①降级后的 L1 仍可运行 KVM 创建 L2 虚拟机，L0 需提供 eVMCS 支持其高效运行；②v2 的 Partition 模型（§4.1）与 GPM 域内变异正是对该形态的类型系统支撑——v2 不实现多分区，但不堵死 HyperGPU 已验证的落地路径。由此 v2 差距清单补充一条：**嵌套虚拟化支持（eVMCS）为 HyperGPU 形态的硬依赖**，见实现设计文档 §0.2 G15。
+这证明两件事：①降级后的 L1 仍可运行 KVM 创建 L2 虚拟机，L0 需提供 eVMCS 支持其高效运行；②v2 的 Partition 模型（§4.1）与 GPM 域内变异正是对该形态的类型系统支撑——v2 不实现多分区，但不堵死 HyperGPU 已验证的落地路径。由此 v2 差距清单补充一条：**嵌套虚拟化支持（eVMCS）为 HyperGPU 形态的硬依赖**，见实现设计文档 §0.2 G15。**状态（2026-10 更新）：设计完成**——详细实现设计见 [nested-vmx-design.md](nested-vmx-design.md)（C1 能力暴露 / C2 CR4.VMXE 透传 / C3 VMCS12 仿真 / C4 VM-entry 合并 / C5 影子 EPT / C6 退出反射，Intel VMX 限定），实现按里程碑推进，位于 cargo feature `nested` + Makefile `NESTED=on` 之后，**默认关闭**（关闭 = 现状逐位一致：VMX 位隐藏、VMX 能力 MSR 读 0 写拒）。
 
 **L2 隔离 VM 的保护机制——「软件隔离」而非「内存加密」（定义澄清）**：本方案的隔离 VM（HyperGPU 原始材料称「L2 CVM」，本文统一用「隔离 VM」以免与业界 Confidential VM 混淆）是**由 L0 HyperEnclave 软件隔离的受保护虚拟机**，机密性完全来自二级页表结构性隔离——L0 在 L1 宿主的 GPM（EPT/NPT）中把隔离 VM 内存映射为空/不可达，L1（含 root 管理员）结构性读不到隔离 VM 内存与寄存器。**隔离 VM 内存不含硬件内存加密，以明文存于 DRAM**：它既非 Intel TDX（MKTME 每 TD KeyID 域加密），也非 AMD SEV-SNP（每 VM ASID 域加密 + RMP）。原因有二——① **TDX / SEV-SNP 均不支持嵌套虚拟化**，而本形态是 L0 monitor + L1 KVM + L2 隔离 VM 三层嵌套，TDX SEAM / SNP ASP 都要独占 CPU 最高特权层，与 L0 HyperEnclave 互斥；② **软件栈未按 ASID/KeyID 手动加密内存页**，平台若仅有 TSME（单密钥全内存加密）则不区分 VM 域，L1 与 L2 共用密钥，挡不住 L1 软件读隔离 VM 内存。故本方案「隔离 VM」取**软件隔离语义**（防宿主软件层，对应 §1.4「可抵御」），非 TDX/SNP 的**内存加密语义**；安全承诺止于隔离边界，不防物理接触 / 探针 / 冷启动。
 
@@ -473,6 +473,17 @@ sequenceDiagram
 - **SMM**：SMM 是 VMX 之外更高特权的 out-of-band 域，SMM 代码可访问 monitor 内存，属 late-launch 架构的固有威胁面。v2 立场：启动时校验 `MSR_SMM_FEATURE_CONTROL` 与 SMRAM 锁定状态，未锁定则告警并在度量日志中记录；不在 monitor 内模拟 SMM（那等价于重写固件）。
 - **S3/S4**：late-launch hypervisor 的公认难点——同类设计 Jailhouse 明确不支持 S3（CPU 状态被 OS 回收后不可恢复）。[^5] v2 策略：PIO 拦截 PM1a/pm1_cnt 端口，默认**拒绝深度睡眠**（返回失败让 host 落回 S0 idle），保留架构上的 `suspend_park` 钩子作为后续研究项。
 - **CPU 热插拔/让渡**：percpu 状态机（现 `HvDisabled/HvEnabled/EnclaveRunning`）增加 `Parked` 态：host 请求回收 CPU 时 hypercall 让渡 → monitor 停止该 CPU 的 launch 循环 → 需要时 IPI 唤醒重新 activate。这是 Jailhouse 模式的 park 语义移植。[^5]
+
+**宿主降级后运行边界（速查，2026-10 与实现核对一致）**：以下行为边界在 PR1–PR5 与设备隔离落地后构成 host 降级运行的完整"不许越过的线"，任一条都不随 guest 意愿改变：
+
+| 边界 | 行为 | 机制锚点 |
+|---|---|---|
+| S3/S4 深睡 | **拒绝**：写 PM1a_CNT（0x604/0x605）注入 #GP（`DenyInjectGP`） | `pio.rs` 策略表 |
+| SMI/SMM | APMC 端口 0xB0–0xB3 写注入 #GP；启动期校验 SMM 锁定，未锁定拒绝激活 | `pio.rs`；§5.3 |
+| LA57（5 级页表） | 宿主内核已开 LA57 时 monitor **fail-fast 拒绝激活**；CPUID LA57 位隐藏 | PR1；`cpuid.rs` |
+| XSETBV / XCR0 | **直通**（不拦截）：真实 XCR0 对 guest 保持权威，CPUID OSXSAVE 位镜像 guest CR4 | `vmm.rs` `set_xcr0`；`cpuid.rs` |
+| PCI 配置端口 0xCF8–0xCFF | 拦截：受保护加速卡读返全 1 / 写丢弃，其余设备真实直通 | `pio.rs`；[device-isolation-design.md](device-isolation-design.md) §2.1 |
+| 未列入策略表的 PIO / MSR | fail-closed：意外陷入即注入 #GP（位图本不生成拦截项，此为纵深防御） | `pio.rs` `handle_pio`；`msr/policy.rs` |
 
 ### 4.8 全局状态安全化（Phase 0，先于一切）
 

@@ -55,6 +55,8 @@ Makefile 参数：
 
 Cargo features（`Cargo.toml`）：`intel`、`amd`、`sme`（隐含 amd）、`stats`、`enclave_interrupt`、`epc48`~`epc384`（EPC 大小档位）。
 
+构建期环境变量（由 `build.rs` 消费，非 Makefile 参数）：`HE_PROTECT_BDF` / `HE_EXCLUDE_BDF`——逗号分隔的 BDF 列表（如 `0000:65:00.0`，也接受短式 `65:00.0`），分别强制把设备加入/移出设备隔离保护集（`src/device/`，见 `docs/device-isolation-design.md`）；**exclude 优先于 protect**，解析失败直接 fail 构建。默认均为空。
+
 ## 4. 代码规范
 
 1. **License 头**：每个 `.rs` 源文件开头必须带 Apache-2.0 版权头，格式照抄任意现有文件（`Copyright (C) 2023 Ant Group CO., Ltd. All rights reserved.` + 许可证文本）。
@@ -84,12 +86,16 @@ src/
 │   ├── shared_mem.rs    # Marshalling Buffer / 共享内存
 │   ├── reclaim.rs       # EPC 页回收（换出/换入）
 │   └── report.rs / measure.rs  # 度量与远程证明
+├── device/              # 设备/GPU 隔离：bdf(16-bit routing id)/ident(三信号分类器)
+│                        #   /pci(配置空间解码)/policy(处置表)/domain(每设备 DMA 域)；
+│                        #   设计文档 docs/device-isolation-design.md
 ├── iommu/mod.rs         # IOMMU 抽象：init 时配置 DMA 页表并启用
 ├── memory/              # 通用内存框架：paging.rs(页表抽象)/frame.rs/heap.rs/mmio.rs
 ├── intervaltree.rs      # 区间树（共享内存/normal world 校验）
 └── arch/x86_64/
     ├── vmm.rs           # VmExit 公共处理（CPUID 伪装/hypercall 分发/MSR）
     ├── entry.rs         # arch_entry 汇编入口（栈切换）
+    ├── pci_cfg.rs       # legacy 0xCF8/0xCFC 配置空间访问 + CONFIG_ADDRESS 编解码
     ├── intel/           # VMX 实现：vcpu.rs(VMCS)/vmexit.rs/ept.rs/vtd.rs
     └── amd/             # SVM 实现：vcpu.rs(VMCB)/vmexit.rs/npt.rs/iommu.rs
 
