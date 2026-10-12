@@ -48,10 +48,12 @@ use alloc::vec::Vec;
 use spin::Mutex;
 
 use self::bdf::Bdf;
-use self::domain::{DeviceDomain, DomainOwner, FIRST_PRIVATE_DOMAIN_ID};
-use self::pci::{ConfigAccess, ConfigWriteAccess};
+use self::domain::{DeviceDomain, DmaMapping, DomainOwner, FIRST_PRIVATE_DOMAIN_ID};
+use self::pci::ConfigWriteAccess;
 use self::policy::{DeviceAction, ProtectedDevice};
+use crate::arch::vmm::Iommu;
 use crate::error::HvResult;
+use crate::iommu::GenericIommu;
 use crate::memory::PAGE_SIZE;
 use crate::sync::LateInit;
 
@@ -209,51 +211,104 @@ impl DeviceManager {
         out
     }
 
-    /// Assign a device to an owner and grant it DMA to `ranges`.
-    ///
-    /// Caller must have validated that every range is normal-world memory.
-    pub fn assign(&self, bdf: Bdf, handle: u64, ranges: &[(usize, usize)]) -> HvResult {
+    /// Claim a protected device for `handle`. The domain stays empty
+    /// (fail-closed) until `map_dma` grants it memory.
+    pub fn assign(&self, bdf: Bdf, handle: u64) -> HvResult {
         let mut domains = self.domains.lock();
-        let domain = domains
-            .iter_mut()
-            .find(|d| d.bdf == bdf)
-            .ok_or_else(|| hv_err!(ENODEV, format!("{} is not a protected device", bdf)))?;
+        let domain = Self::domain_mut(&mut domains, bdf)?;
         if domain.is_assigned() {
             return hv_result_err!(
                 EBUSY,
                 format!("{} is already assigned to {:?}", bdf, domain.owner)
             );
         }
-        // Build the full mapping before publishing the owner, so a failure
-        // half way leaves the device fail-closed rather than partly open.
-        for &(start, size) in ranges {
-            if let Err(e) = domain.map_range(start, size) {
-                domain.clear();
-                return Err(e);
-            }
-        }
         domain.owner = DomainOwner::Assigned { handle };
         info!(
-            "assigned {} to handle {:#x}, domain {}, {} range(s)",
-            bdf,
-            handle,
-            domain.domain_id,
-            ranges.len()
+            "assigned {} to handle {:#x}, domain {}",
+            bdf, handle, domain.domain_id
         );
         Ok(())
     }
 
-    /// Revoke an assignment, returning the device to fail-closed.
-    pub fn release(&self, bdf: Bdf) -> HvResult {
+    /// Grant the device's owner a batch of DMA mappings, all or nothing.
+    ///
+    /// Caller must have validated that every `paddr` range is normal-world
+    /// memory. `handle` must match the current owner, so one VM cannot widen
+    /// another's device.
+    pub fn map_dma(
+        &self,
+        bdf: Bdf,
+        handle: u64,
+        batch: &[DmaMapping],
+        iommus: &[Iommu],
+    ) -> HvResult {
         let mut domains = self.domains.lock();
-        let domain = domains
-            .iter_mut()
-            .find(|d| d.bdf == bdf)
-            .ok_or_else(|| hv_err!(ENODEV, format!("{} is not a protected device", bdf)))?;
+        let domain = Self::domain_mut(&mut domains, bdf)?;
+        if domain.owner != (DomainOwner::Assigned { handle }) {
+            return hv_result_err!(
+                EPERM,
+                format!("{} is not assigned to handle {:#x}", bdf, handle)
+            );
+        }
+        domain.map_batch(batch)?;
+        Self::sync_iommu(domain, iommus)?;
+        debug!(
+            "{}: +{} DMA mapping(s), {} total",
+            bdf,
+            batch.len(),
+            domain.mappings().len()
+        );
+        Ok(())
+    }
+
+    /// Revoke an assignment and every grant, returning the device to
+    /// fail-closed. Stale IOTLB entries are flushed before this returns, so
+    /// once the caller reuses the memory the device can no longer reach it.
+    pub fn release(&self, bdf: Bdf, iommus: &[Iommu]) -> HvResult {
+        let mut domains = self.domains.lock();
+        let domain = Self::domain_mut(&mut domains, bdf)?;
         domain.clear();
         domain.owner = DomainOwner::Unassigned;
+        Self::sync_iommu(domain, iommus)?;
         info!("released {}, DMA starved again", bdf);
         Ok(())
+    }
+
+    fn domain_mut(domains: &mut [DeviceDomain], bdf: Bdf) -> HvResult<&mut DeviceDomain> {
+        domains
+            .iter_mut()
+            .find(|d| d.bdf == bdf)
+            .ok_or_else(|| hv_err!(ENODEV, format!("{} is not a protected device", bdf)))
+    }
+
+    /// Re-point every IOMMU at this domain's table. Both vendor backends
+    /// invalidate the cached entry and the domain's IOTLB when translation
+    /// is already on, which is what makes a map/unmap take effect.
+    fn sync_iommu(domain: &mut DeviceDomain, iommus: &[Iommu]) -> HvResult {
+        if iommus.is_empty() {
+            return Ok(());
+        }
+        let (bdf, domain_id) = (domain.bdf, domain.domain_id);
+        let pt = domain.page_table();
+        for iommu in iommus {
+            iommu.set_device_page_table(bdf, pt, domain_id)?;
+        }
+        Ok(())
+    }
+
+    /// Snapshot of every protected device and its assignment state.
+    pub fn snapshot(&self) -> Vec<(ProtectedDevice, DomainOwner)> {
+        let domains = self.domains.lock();
+        self.devices
+            .iter()
+            .map(|dev| {
+                let owner = domains
+                    .iter()
+                    .find(|d| d.bdf == dev.bdf())
+                    .map_or(DomainOwner::Unassigned, |d| d.owner);
+                (dev.clone(), owner)
+            })
+            .collect()
     }
 
     /// Run `f` against the domain of `bdf`.
@@ -264,21 +319,13 @@ impl DeviceManager {
 
     /// Program every protected device's private domain into the IOMMU,
     /// taking it out of the shared default domain.
-    pub fn program_iommu(&self, iommus: &[crate::arch::vmm::Iommu]) -> HvResult {
-        use crate::iommu::GenericIommu;
-        use crate::memory::GenericPageTableImmut;
+    pub fn program_iommu(&self, iommus: &[Iommu]) -> HvResult {
         let mut domains = self.domains.lock();
         for domain in domains.iter_mut() {
-            let (bdf, domain_id) = (domain.bdf, domain.domain_id);
-            let pt = domain.page_table();
-            for iommu in iommus {
-                iommu.set_device_page_table(bdf, pt, domain_id)?;
-            }
+            Self::sync_iommu(domain, iommus)?;
             info!(
-                "{} moved to private IOMMU domain {} (root {:#x}), DMA starved until assigned",
-                bdf,
-                domain_id,
-                pt.root_paddr()
+                "{} moved to private IOMMU domain {}, DMA starved until assigned",
+                domain.bdf, domain.domain_id
             );
         }
         Ok(())
@@ -353,6 +400,7 @@ pub fn is_protected_device(bdf: Bdf) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::device::pci::ConfigAccess;
     use alloc::collections::BTreeMap;
     use core::cell::RefCell;
 
@@ -465,35 +513,70 @@ mod tests {
         assert!(!reachable, "an unassigned device must not reach any memory");
     }
 
+    fn map(iova: u64, paddr: u64, size: u64) -> DmaMapping {
+        DmaMapping { iova, paddr, size }
+    }
+
     #[test]
     fn test_assign_rejects_unknown_and_double_assignment() {
         let m = manager();
         let bdf = Bdf::new(0x65, 0, 0);
         // The iGPU is not a protected device: it has no domain to assign.
-        assert!(m.assign(Bdf::new(0, 2, 0), 1, &[]).is_err());
+        assert!(m.assign(Bdf::new(0, 2, 0), 1).is_err());
         // First assignment succeeds, the second is refused.
-        assert!(m.assign(bdf, 0xcafe, &[]).is_ok());
-        assert!(m.assign(bdf, 0xbeef, &[]).is_err());
+        assert!(m.assign(bdf, 0xcafe).is_ok());
+        assert!(m.assign(bdf, 0xbeef).is_err());
         // After release it can be assigned again.
-        assert!(m.release(bdf).is_ok());
-        assert!(m.assign(bdf, 0xbeef, &[]).is_ok());
+        assert!(m.release(bdf, &[]).is_ok());
+        assert!(m.assign(bdf, 0xbeef).is_ok());
     }
 
     #[test]
-    fn test_assign_rejects_misaligned_range() {
+    fn test_map_dma_requires_matching_owner() {
         let m = manager();
         let bdf = Bdf::new(0x65, 0, 0);
-        // Unaligned start, and a size that is not a page multiple.
-        assert!(m.assign(bdf, 1, &[(0x1001, PAGE_SIZE)]).is_err());
-        assert!(m.assign(bdf, 1, &[(0x1000, 0x1)]).is_err());
-        // A rejected assignment must leave the device unassigned, not
-        // half-mapped.
-        assert!(!m.with_domain(bdf, |d| d.is_assigned()).unwrap());
+        // Unassigned: nobody may grant it memory.
+        assert!(m.map_dma(bdf, 1, &[], &[]).is_err());
+        assert!(m.assign(bdf, 1).is_ok());
+        // Another owner cannot widen this device's view.
+        assert!(m.map_dma(bdf, 2, &[], &[]).is_err());
+        assert!(m.map_dma(bdf, 1, &[], &[]).is_ok());
+    }
+
+    #[test]
+    fn test_map_dma_rejects_bad_batch_without_side_effects() {
+        let m = manager();
+        let bdf = Bdf::new(0x65, 0, 0);
+        assert!(m.assign(bdf, 1).is_ok());
+        let p = PAGE_SIZE as u64;
+        // Unaligned iova, unaligned paddr, partial page, empty, wrap-around.
+        for bad in [
+            map(0x1001, 0x1000, p),
+            map(0x1000, 0x1001, p),
+            map(0x1000, 0x1000, 1),
+            map(0x1000, 0x1000, 0),
+            map(u64::MAX & !(p - 1), 0x1000, 2 * p),
+        ] {
+            assert!(m.map_dma(bdf, 1, &[bad], &[]).is_err(), "{:?}", bad);
+        }
+        // Overlap inside one batch: refused, and the good first entry is
+        // not left behind.
+        let overlapping = [
+            map(0x10_0000, 0x20_0000, 2 * p),
+            map(0x10_1000, 0x30_0000, p),
+        ];
+        assert!(m.map_dma(bdf, 1, &overlapping, &[]).is_err());
+        let nothing_mapped = m.with_domain(bdf, |d| d.mappings().is_empty()).unwrap();
+        assert!(
+            nothing_mapped,
+            "a rejected batch must leave no grant behind"
+        );
+        assert!(!m.with_domain(bdf, |d| d.can_access(0x10_0000)).unwrap());
     }
 
     #[test]
     fn test_release_unknown_device_errors() {
         let m = manager();
-        assert!(m.release(Bdf::new(0x01, 0, 0)).is_err());
+        assert!(m.release(Bdf::new(0x01, 0, 0), &[]).is_err());
     }
 }

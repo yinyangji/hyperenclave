@@ -72,6 +72,12 @@ pub fn init() -> HvResult {
     Ok(())
 }
 
+/// The IOMMUs translation is running on; empty before `init()`, in which
+/// case there is nothing cached to invalidate yet.
+pub fn active_iommus() -> &'static [Iommu] {
+    IOMMU_LIST.get().map_or(&[], |list| list.as_slice())
+}
+
 pub fn disable() -> HvResult {
     info!("Disable IOMMU...");
     for iommu in IOMMU_LIST.get().ok_or(hv_err!(EINVAL))? {

@@ -51,6 +51,43 @@ pub enum DomainOwner {
     Assigned { handle: u64 },
 }
 
+/// One I/O-virtual to physical grant in a device's DMA domain.
+///
+/// `iova` is the address the device emits (for a VM-owned device, the VM's
+/// guest-physical address); `paddr` is the host-physical frame it reaches.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DmaMapping {
+    pub iova: u64,
+    pub paddr: u64,
+    pub size: u64,
+}
+
+impl DmaMapping {
+    fn iova_end(&self) -> u64 {
+        self.iova + self.size
+    }
+
+    /// Structural checks only: page alignment, non-empty, no wrap-around.
+    /// Whether `paddr` is memory the device may reach is the caller's call.
+    fn validate(&self) -> HvResult {
+        let page = PAGE_SIZE as u64;
+        let aligned = self.iova % page == 0 && self.paddr % page == 0 && self.size % page == 0;
+        let wraps = self.iova.checked_add(self.size).is_none()
+            || self.paddr.checked_add(self.size).is_none();
+        if self.size == 0 || !aligned || wraps {
+            return hv_result_err!(
+                EINVAL,
+                format!(
+                    "invalid DMA mapping iova {:#x} -> paddr {:#x} size {:#x}",
+                    self.iova, self.paddr, self.size
+                )
+            );
+        }
+        Ok(())
+    }
+}
+
 /// A DMA domain owning exactly one device.
 ///
 /// One device per domain, deliberately: sharing a domain between accelerators
@@ -68,8 +105,8 @@ pub struct DeviceDomain {
     /// would make host-side unit tests depend on the monitor's frame
     /// allocator, which does not exist there.
     page_table: Option<MemorySet<IoPageTable>>,
-    /// Guest-physical ranges currently mapped into `page_table`.
-    mapped: Vec<(usize, usize)>,
+    /// Grants currently mapped into `page_table`.
+    mapped: Vec<DmaMapping>,
 }
 
 impl DeviceDomain {
@@ -96,34 +133,63 @@ impl DeviceDomain {
         matches!(self.owner, DomainOwner::Assigned { .. })
     }
 
-    /// Grant the device DMA access to `[start, start + size)`.
+    fn overlaps_existing(&self, m: &DmaMapping) -> bool {
+        self.mapped
+            .iter()
+            .any(|e| m.iova < e.iova_end() && e.iova < m.iova_end())
+    }
+
+    /// Add a batch of grants, all or nothing.
     ///
-    /// The caller must have already validated that the range is normal-world
-    /// memory; this function enforces only the structural invariants
-    /// (alignment, non-empty, no overlap with an existing grant).
-    pub fn map_range(&mut self, start: usize, size: usize) -> HvResult {
-        if size == 0 || start % PAGE_SIZE != 0 || size % PAGE_SIZE != 0 {
-            return hv_result_err!(
-                EINVAL,
-                format!(
-                    "DMA range [{:#x}, {:#x}) is not page aligned",
-                    start,
-                    start + size
-                )
-            );
+    /// Every mapping is checked (structure, overlap with existing grants and
+    /// with the rest of the batch) before the page table is touched, so a bad
+    /// batch is refused without side effects; a page-table failure half way
+    /// rolls back what this batch already inserted.
+    pub fn map_batch(&mut self, batch: &[DmaMapping]) -> HvResult {
+        let committed = self.mapped.len();
+        for m in batch {
+            let checked = m.validate().and_then(|()| {
+                if self.overlaps_existing(m) {
+                    hv_result_err!(
+                        EEXIST,
+                        format!("iova {:#x} size {:#x} already mapped", m.iova, m.size)
+                    )
+                } else {
+                    Ok(())
+                }
+            });
+            if let Err(e) = checked {
+                self.mapped.truncate(committed);
+                return Err(e);
+            }
+            // Staged in `mapped` so later batch entries see it for overlap.
+            self.mapped.push(*m);
         }
-        self.ensure_page_table()
-            .insert(MemoryRegion::new_with_offset_mapper(
-                start,
-                start,
-                size,
+        for i in committed..self.mapped.len() {
+            let m = self.mapped[i];
+            let region = MemoryRegion::new_with_offset_mapper(
+                m.iova as usize,
+                m.paddr as usize,
+                m.size as usize,
                 MemFlags::READ | MemFlags::WRITE,
-            ))?;
-        self.mapped.push((start, size));
+            );
+            if let Err(e) = self.ensure_page_table().insert(region) {
+                for done in &self.mapped[committed..i] {
+                    if let Some(pt) = &mut self.page_table {
+                        // Best effort: the region was inserted by this very
+                        // batch, so deleting it can only fail on corruption.
+                        let _ = pt.delete(done.iova as usize);
+                    }
+                }
+                self.mapped.truncate(committed);
+                return Err(e);
+            }
+        }
         Ok(())
     }
 
     /// Revoke every grant, returning the domain to its fail-closed state.
+    /// The page-table root survives, so the IOMMU entry stays valid.
     pub fn clear(&mut self) {
         if let Some(pt) = &mut self.page_table {
             pt.clear();
@@ -131,18 +197,18 @@ impl DeviceDomain {
         self.mapped.clear();
     }
 
-    /// Guest-physical ranges this device can currently reach.
-    pub fn mapped_ranges(&self) -> &[(usize, usize)] {
+    /// Grants this device currently holds.
+    pub fn mappings(&self) -> &[DmaMapping] {
         &self.mapped
     }
 
-    /// Whether this domain can translate `gpaddr`, i.e. whether the device
-    /// could DMA to it right now. `mapped` is the ground truth for grants,
-    /// so this needs no page-table walk (and works in host unit tests).
-    pub fn can_access(&self, gpaddr: usize) -> bool {
+    /// Whether the device could DMA to `iova` right now. `mapped` is the
+    /// ground truth for grants, so this needs no page-table walk (and works
+    /// in host unit tests).
+    pub fn can_access(&self, iova: u64) -> bool {
         self.mapped
             .iter()
-            .any(|&(start, size)| gpaddr.wrapping_sub(start) < size)
+            .any(|m| iova.wrapping_sub(m.iova) < m.size)
     }
 }
 
@@ -152,7 +218,7 @@ impl core::fmt::Debug for DeviceDomain {
             .field("domain_id", &self.domain_id)
             .field("bdf", &format_args!("{}", self.bdf))
             .field("owner", &self.owner)
-            .field("mapped_ranges", &self.mapped)
+            .field("mappings", &self.mapped)
             .finish()
     }
 }

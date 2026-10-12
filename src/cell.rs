@@ -308,6 +308,19 @@ impl Cell {
         Ok(())
     }
 
+    /// Whether all of [`start`, `start` + `size`) is ordinary host RAM a
+    /// device may be granted DMA to: inside one driver-reported normal-world
+    /// region and clear of the Convertible Memory Range (EPC, current or
+    /// future). Ranges spanning two adjacent regions are refused; callers
+    /// split them.
+    pub fn is_normal_world_dma_range(&self, start: GuestPhysAddr, size: usize) -> bool {
+        let Some(end) = start.checked_add(size) else {
+            return false;
+        };
+        self.normal_world_mem_region.contains_range(start..end)
+            && !crate::memory::cmr::ConvMemManager::overlaps_conv_mem(start, size)
+    }
+
     /// Whether [gpaddr, gpaddr + 4kB) is accessible by hypervisor.
     pub fn is_valid_normal_world_gpaddr(&self, gpaddr: GuestPhysAddr) -> bool {
         self.normal_world_mem_region.contains(&gpaddr)

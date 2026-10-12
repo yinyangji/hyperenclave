@@ -15,6 +15,7 @@
 #[macro_use]
 pub mod error;
 
+pub mod device;
 mod enclave;
 pub mod tc;
 
@@ -71,6 +72,12 @@ numeric_enum! {
         CpuPark = 0x40,
         CpuUnpark = 0x41,
         GetPolicyStats = 0x42,
+
+        // Protected accelerators (docs/device-isolation-design.md).
+        DeviceList = 0x50,
+        DeviceAssign = 0x51,
+        DeviceRelease = 0x52,
+        DeviceMapDma = 0x53,
 
         EnclaveEnter            = 0x8000_0000,
         EnclaveExit             = 0x8000_0001,
@@ -131,6 +138,10 @@ impl HyperCallCode {
             | HyperCallCode::HuDomainUnregister
             | HyperCallCode::CpuPark
             | HyperCallCode::GetPolicyStats
+            | HyperCallCode::DeviceList
+            | HyperCallCode::DeviceAssign
+            | HyperCallCode::DeviceRelease
+            | HyperCallCode::DeviceMapDma
             | HyperCallCode::EnclaveEnter
             | HyperCallCode::EnclaveResume
             | HyperCallCode::EnclaveQuote
@@ -295,6 +306,14 @@ impl<'a> HyperCall<'a> {
             HyperCallCode::SetInitCmrmDone => self.set_init_cmrm_done(),
             HyperCallCode::GetPolicyStats => {
                 self.get_policy_stats(arg0.as_guest_ptr_ns(&self.gpt, guest_privilege_level))
+            }
+            HyperCallCode::DeviceList => {
+                self.device_list(arg0.as_guest_ptr_ns(&self.gpt, guest_privilege_level))
+            }
+            HyperCallCode::DeviceAssign => self.device_assign(arg0, arg1),
+            HyperCallCode::DeviceRelease => self.device_release(arg0),
+            HyperCallCode::DeviceMapDma => {
+                self.device_map_dma(arg0.as_guest_ptr_ns(&self.gpt, guest_privilege_level))
             }
             // §6 HU-domain and §8 CPU-park: codes reserved, bodies not yet
             // implemented — refuse cleanly instead of falling through.

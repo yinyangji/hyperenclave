@@ -396,6 +396,12 @@ impl ConvMemManager {
         self.cmrm_manager.write().initialize_cmrm(size / PAGE_SIZE)
     }
 
+    /// Whether [`start`, `start` + `size`) touches the Convertible Memory
+    /// Range, i.e. memory that is or may become EPC.
+    pub fn overlaps_conv_mem(start: HostPhysAddr, size: usize) -> bool {
+        start < *CONV_MEM_END && start.saturating_add(size) > *CONV_MEM_START
+    }
+
     pub fn set_init_cmrm_done(&self) -> HyperCallResult<usize> {
         self.cmrm_manager.write().set_init_cmrm_done()
     }

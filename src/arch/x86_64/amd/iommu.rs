@@ -271,6 +271,13 @@ impl DevTableEntry {
         self.raw64_0.set_addr(root_paddr);
         self.raw64_0.set_next_level(PageTableLevel::L4); // 4 Level Page Table (provides a 48-bit GPA space)
     }
+
+    /// DTE bits 79:64. The IOTLB is tagged by DomainID, so two devices with
+    /// different page-table roots must never share one, or cached
+    /// translations of one leak to the other.
+    fn set_domain_id(&mut self, domain_id: u16) {
+        self.raw64_1 = (self.raw64_1 & !0xffff) | domain_id as u64;
+    }
 }
 
 impl fmt::Debug for DevTableEntry {
@@ -287,9 +294,64 @@ impl fmt::Debug for DevTableEntry {
     }
 }
 
+/// Command buffer: one 4KB page = 256 entries of 16 bytes.
+const CMD_BUF_SIZE: usize = PAGE_SIZE;
+const CMD_ENTRY_SIZE: usize = 16;
+/// Command Buffer Base Register ComLen (bits 59:56) = log2(entries).
+/// 256 entries -> 8; values below 8 are reserved.
+const CMD_BUF_COMLEN_256: u64 = 8 << 56;
+/// Head/tail pointer registers hold a byte offset in bits 18:4.
+const CMD_PTR_MASK: u64 = 0x0007_fff0;
+/// Physical address bits 51:12 of a base register.
+const BASE_ADDR_MASK: u64 = 0x000f_ffff_ffff_f000;
+
+/// Command opcodes, placed in bits 63:60 of the first qword
+/// (AMD IOMMU spec §2.4).
+const CMD_COMPLETION_WAIT: u64 = 0x01;
+const CMD_INVALIDATE_DEVTAB_ENTRY: u64 = 0x02;
+const CMD_INVALIDATE_IOMMU_PAGES: u64 = 0x03;
+/// COMPLETION_WAIT flag: store `StoreData` to `StoreAddr` when done.
+const COMPLETION_WAIT_S: u64 = 1 << 0;
+/// INVALIDATE_IOMMU_PAGES flags and the "whole address space" address
+/// (S=1 with every address bit below 63 set).
+const INV_PAGES_S: u64 = 1 << 0;
+const INV_PAGES_PDE: u64 = 1 << 1;
+const INV_PAGES_ALL_ADDR: u64 = 0x7fff_ffff_ffff_f000;
+
+/// Hardware DomainID of the shared default domain (matches VT-d).
+const DEFAULT_DOMAIN_ID: u16 = 1;
+/// Bound on completion polling. A healthy IOMMU retires a handful of
+/// commands in microseconds; failing beats hanging the whole machine.
+const CMD_TIMEOUT_SPINS: usize = 100_000_000;
+
+/// Build the 128-bit encodings as two qwords, kept pure for unit tests.
+fn cmd_inv_devtab_entry(bdf: Bdf) -> [u64; 2] {
+    [(CMD_INVALIDATE_DEVTAB_ENTRY << 60) | bdf.raw() as u64, 0]
+}
+
+fn cmd_inv_iommu_pages(domain_id: u16) -> [u64; 2] {
+    [
+        (CMD_INVALIDATE_IOMMU_PAGES << 60) | ((domain_id as u64) << 32),
+        INV_PAGES_ALL_ADDR | INV_PAGES_PDE | INV_PAGES_S,
+    ]
+}
+
+fn cmd_completion_wait(store_paddr: HostPhysAddr, data: u64) -> [u64; 2] {
+    // StoreAddr[51:3] occupies the same bit positions in the first qword.
+    let addr = store_paddr as u64 & 0x000f_ffff_ffff_fff8;
+    [(CMD_COMPLETION_WAIT << 60) | addr | COMPLETION_WAIT_S, data]
+}
+
 struct IommuInner {
     regs: &'static mut IommuMmioRegion,
     dev_table_frame: Frame,
+    cmd_buf_frame: Frame,
+    /// Target of COMPLETION_WAIT stores; separate from the ring so the
+    /// IOMMU's write can never land on a command slot.
+    sem_frame: Frame,
+    /// Value the next COMPLETION_WAIT stores; monotonic so a stale store
+    /// can never satisfy a later wait.
+    sem_seq: u64,
 }
 
 pub struct Iommu {
@@ -299,7 +361,51 @@ pub struct Iommu {
 impl IommuInner {
     fn dev_table_entries(&mut self) -> &mut [DevTableEntry] {
         let ptr = self.dev_table_frame.as_mut_ptr() as _;
+        // SAFETY: the 2MB device table frame is owned by this IOMMU and holds
+        // exactly DEV_TABLE_ENTRY_COUNT entries; `&mut self` (under the
+        // mutex) makes the borrow exclusive.
         unsafe { core::slice::from_raw_parts_mut(ptr, DEV_TABLE_ENTRY_COUNT) }
+    }
+
+    fn is_enabled(&self) -> bool {
+        self.regs.control.read() & IommuControlFlags::IOMMU_EN.bits() != 0
+    }
+
+    /// Append one command at the tail and hand it to the hardware. Callers
+    /// always finish a batch with `completion_wait`, which drains the ring,
+    /// so a batch of a few commands can never overrun the head.
+    fn push_cmd(&mut self, cmd: [u64; 2]) {
+        let tail = (self.regs.cmd_buf_tail.read() & CMD_PTR_MASK) as usize;
+        let slot = self.cmd_buf_frame.as_mut_ptr() as *mut u64;
+        // SAFETY: `tail` comes from the hardware's 18:4 field, so it is
+        // 16-byte aligned; the ring is CMD_BUF_SIZE long and the hardware
+        // wraps the pointer within it, so both qwords stay in the frame.
+        unsafe {
+            slot.add(tail / 8).write_volatile(cmd[0]);
+            slot.add(tail / 8 + 1).write_volatile(cmd[1]);
+        }
+        let next = (tail + CMD_ENTRY_SIZE) % CMD_BUF_SIZE;
+        self.regs.cmd_buf_tail.write(next as u64);
+    }
+
+    /// Wait until every previously pushed command has completed.
+    fn completion_wait(&mut self) -> HvResult {
+        self.sem_seq = self.sem_seq.wrapping_add(1);
+        let seq = self.sem_seq;
+        let sem = self.sem_frame.as_mut_ptr() as *mut u64;
+        // SAFETY: `sem_frame` is a whole frame owned by this IOMMU; the
+        // IOMMU is the only other writer, and only via this command.
+        unsafe { sem.write_volatile(0) };
+        let store = phys_encrypted(self.sem_frame.start_paddr());
+        self.push_cmd(cmd_completion_wait(store, seq));
+        for _ in 0..CMD_TIMEOUT_SPINS {
+            // SAFETY: as above.
+            if unsafe { sem.read_volatile() } == seq {
+                return Ok(());
+            }
+            core::hint::spin_loop();
+        }
+        hv_result_err!(EIO, "AMD IOMMU COMPLETION_WAIT timed out")
     }
 }
 
@@ -313,10 +419,22 @@ impl Iommu {
         let dev_table_base = phys_encrypted(dev_table_frame.start_paddr()) | 0x1FF;
         regs.dev_table_base.write(dev_table_base as u64);
 
+        // The IOMMU fetches commands with the C-bit the base register
+        // carries, so it must match how the monitor writes them under SME.
+        let cmd_buf_frame = Frame::new_zero()?;
+        let cmd_base = phys_encrypted(cmd_buf_frame.start_paddr()) as u64 & BASE_ADDR_MASK;
+        regs.cmd_buf_base.write(cmd_base | CMD_BUF_COMLEN_256);
+        regs.cmd_buf_head.write(0);
+        regs.cmd_buf_tail.write(0);
+        let sem_frame = Frame::new_zero()?;
+
         Ok(Self {
             inner: Mutex::new(IommuInner {
                 regs,
                 dev_table_frame,
+                cmd_buf_frame,
+                sem_frame,
+                sem_seq: 0,
             }),
         })
     }
@@ -327,29 +445,37 @@ impl GenericIommu for Iommu {
         let mut inner = self.inner.lock();
         for entry in inner.dev_table_entries() {
             entry.set_table_root(pt.root_paddr());
+            entry.set_domain_id(DEFAULT_DOMAIN_ID);
         }
         Ok(())
     }
 
-    fn set_device_page_table(&self, bdf: Bdf, pt: &IoPageTable, _domain_id: u16) -> HvResult {
-        // The AMD device table entry has no domain-id field in the
-        // basic-translation format this driver programs; isolation comes
-        // from the private page-table root itself.
+    fn set_device_page_table(&self, bdf: Bdf, pt: &IoPageTable, domain_id: u16) -> HvResult {
+        if domain_id == DEFAULT_DOMAIN_ID {
+            return hv_result_err!(EINVAL, "private domain id collides with the default domain");
+        }
         let mut inner = self.inner.lock();
-        inner.dev_table_entries()[bdf.raw() as usize].set_table_root(pt.root_paddr());
-        // No invalidation command is needed here: this is called from
-        // `iommu::init()` before `set_enabled(true)`, so translation is
-        // still off and nothing is cached. Limitation: runtime
-        // re-assignment (assign/release in `src/device/mod.rs`) would need
-        // INVALIDATE_DEVTAB_ENTRY commands, which this AMD driver does not
-        // implement yet — only the boot-time fail-closed state is
-        // guaranteed on AMD.
+        let entry = &mut inner.dev_table_entries()[bdf.raw() as usize];
+        entry.set_table_root(pt.root_paddr());
+        entry.set_domain_id(domain_id);
+
+        // The IOMMU processes commands only while enabled. At boot this
+        // runs before `set_enabled(true)`, so nothing is cached yet and
+        // there is nothing to flush; at runtime the cached DTE and the
+        // domain's IOTLB entries must go before the new root is trusted.
+        if inner.is_enabled() {
+            inner.push_cmd(cmd_inv_devtab_entry(bdf));
+            inner.push_cmd(cmd_inv_iommu_pages(domain_id));
+            inner.completion_wait()?;
+        }
         Ok(())
     }
 
     fn set_enabled(&self, enabled: bool) -> HvResult {
+        // Written whole, not read-modified: stale firmware bits (e.g. an event
+        // log enable with no log programmed) must not survive.
         let flags = if enabled {
-            IommuControlFlags::IOMMU_EN
+            IommuControlFlags::IOMMU_EN | IommuControlFlags::CMD_BUF_EN
         } else {
             IommuControlFlags::empty()
         };
@@ -359,3 +485,43 @@ impl GenericIommu for Iommu {
 }
 
 pub type IoPageTable = Level4PageTable<GuestPhysAddr, IoPTEntry, EmptyPagingInstr>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_inv_devtab_entry_encoding() {
+        let cmd = cmd_inv_devtab_entry(Bdf::new(0x65, 0, 0));
+        // Opcode 02h in bits 63:60, DeviceID in bits 15:0.
+        assert_eq!(cmd, [0x2000_0000_0000_6500, 0]);
+    }
+
+    #[test]
+    fn test_inv_iommu_pages_encoding() {
+        let cmd = cmd_inv_iommu_pages(16);
+        // Opcode 03h, DomainID in bits 47:32, PASID 0.
+        assert_eq!(cmd[0], 0x3000_0010_0000_0000);
+        // Whole address space: S=1, PDE=1, address 7FFF_FFFF_FFFF_F000.
+        assert_eq!(cmd[1], 0x7fff_ffff_ffff_f003);
+    }
+
+    #[test]
+    fn test_completion_wait_encoding() {
+        let cmd = cmd_completion_wait(0x0000_8012_3456_7008, 42);
+        // Opcode 01h, StoreAddr[51:3] in place, S=1.
+        assert_eq!(cmd[0], 0x1000_8012_3456_7009);
+        assert_eq!(cmd[1], 42);
+        // Low address bits never leak into the flag field.
+        assert_eq!(cmd_completion_wait(0x1007, 0)[0] & 0x7, 1);
+    }
+
+    #[test]
+    fn test_comlen_encoding() {
+        // 256 entries of 16 bytes fill exactly one page.
+        assert_eq!(
+            CMD_BUF_SIZE / CMD_ENTRY_SIZE,
+            1 << (CMD_BUF_COMLEN_256 >> 56)
+        );
+    }
+}
