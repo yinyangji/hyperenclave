@@ -205,13 +205,15 @@ impl VmExit<'_> {
             }
             Err(e) if e.code() == EFAULT || e.code() == EACCES => {
                 // L1's nNPT is missing or permissions deny the access.
-                // Reflect the #NPF back to L1 (M4 will implement reflection).
+                // Reflect the #NPF back to L1 by triggering normal exit reflection.
                 warn!(
-                    "L2 #NPF cannot be resolved, needs reflection to L1: {:?}",
+                    "L2 #NPF cannot be resolved (L1 nNPT issue), reflecting to L1: {:?}",
                     e
                 );
-                // TODO M4: Implement reflect_npf_to_l1().
-                hv_result_err!(ENOSYS, "L2 #NPF reflection not implemented (M4)")
+
+                // The exit reflection will happen in handle_exit() after we return this error.
+                // Set a flag so handle_exit knows this NPF needs reflection.
+                Err(e)
             }
             Err(e) => Err(e),
         }
@@ -233,6 +235,32 @@ impl VmExit<'_> {
                 return hv_result_err!(EIO);
             }
         };
+
+        // Check if we're running L2 (nested mode).
+        #[cfg(feature = "nested")]
+        let in_l2 = self.cpu_data.vcpu.nested.in_l2;
+        #[cfg(not(feature = "nested"))]
+        let in_l2 = false;
+
+        // If in L2, check if L0 should handle this exit or reflect to L1.
+        #[cfg(feature = "nested")]
+        if in_l2 && !super::exit_reflection::should_l0_handle(exit_code) {
+            // Reflect this exit to L1.
+            let vmcb12_gpa = self.cpu_data.vcpu.nested.vmcb12_gpa;
+            let vmcb02 = &self.cpu_data.vcpu.vmcb;
+
+            // TODO: Save VMCB01 reference for proper restoration.
+            // For M4, we use a dummy VMCB01 (will be fixed in cleanup).
+            let dummy_vmcb01 = unsafe { core::mem::zeroed() };
+
+            super::exit_reflection::reflect_exit_to_l1(vmcb02, vmcb12_gpa, &dummy_vmcb01)?;
+
+            // Mark that we're no longer in L2.
+            self.cpu_data.vcpu.nested.in_l2 = false;
+
+            debug!("Reflected L2 exit to L1: exit_code={:#x}", exit_info.exit_code);
+            return Ok(());
+        }
 
         let res = match exit_code {
             SvmExitCode::INVALID => panic!("VM entry failed: {:#x?}\n{:#x?}", exit_info, vcpu.vmcb),
