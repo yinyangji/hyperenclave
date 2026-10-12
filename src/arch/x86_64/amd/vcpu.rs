@@ -300,6 +300,133 @@ impl Vcpu {
         use crate::memory::addr::align_down;
         unsafe { GuestPageTableImmut::from_root(align_down(self.vmcb.save.cr3 as _)) }
     }
+
+    /// Handle VMRUN intercept (M2: state machine only; M3+ will launch L2).
+    /// RAX holds the GPA of VMCB12 (L1's VMCB for L2).
+    #[cfg(feature = "nested")]
+    pub fn handle_vmrun(&mut self) -> HvResult {
+        use super::nested;
+
+        // Check EFER.SVME: VMRUN with SVME clear raises #UD.
+        if !self.nested.is_svm_enabled() {
+            return hv_result_err!(EINVAL, "VMRUN with EFER.SVME=0");
+        }
+
+        let vmcb12_gpa = self.guest_regs.rax;
+
+        // Access VMCB12 to validate it exists and is aligned. M2 does not yet
+        // merge or launch L2; that comes in M3. For now, record the GPA and
+        // return an error so the caller injects a fault (KVM will see the
+        // VMRUN was intercepted but not yet handled).
+        nested::with_vmcb12(vmcb12_gpa, |_vmcb12| {
+            debug!("VMRUN vmcb12_gpa={:#x} (M2: blocked)", vmcb12_gpa);
+            self.nested.vmcb12_gpa = vmcb12_gpa;
+        })?;
+
+        // M3 will: merge VMCB12 + L0 policy → VMCB02, switch in_l2=true, VMRUN.
+        // For M2, we've validated the structure and logged the attempt. The
+        // caller (vmexit.rs) will inject a fault, so KVM's VMRUN path will see
+        // an error and can be debugged.
+        hv_result_err!(ENOSYS, "VMRUN M2: merge not implemented")
+    }
+
+    /// Handle VMLOAD intercept: load a subset of guest state from a VMCB.
+    /// RAX holds the VMCB GPA. Loads FS/GS/TR/LDTR bases, STAR/LSTAR/CSTAR/
+    /// SFMASK, SYSENTER CS/ESP/EIP, and KERNEL_GS_BASE (APM Vol.2 §15.5.1).
+    #[cfg(feature = "nested")]
+    pub fn handle_vmload(&mut self) -> HvResult {
+        use super::nested;
+
+        if !self.nested.is_svm_enabled() {
+            return hv_result_err!(EINVAL, "VMLOAD with EFER.SVME=0");
+        }
+
+        let vmcb_gpa = self.guest_regs.rax;
+
+        nested::with_vmcb12(vmcb_gpa, |vmcb| {
+            let save = &vmcb.save;
+            // Load segment bases (FS, GS, TR, LDTR).
+            self.vmcb.save.fs.base = save.fs.base;
+            self.vmcb.save.gs.base = save.gs.base;
+            self.vmcb.save.tr.base = save.tr.base;
+            self.vmcb.save.ldtr.base = save.ldtr.base;
+
+            // Load SYSCALL/SYSENTER MSRs.
+            self.vmcb.save.star = save.star;
+            self.vmcb.save.lstar = save.lstar;
+            self.vmcb.save.cstar = save.cstar;
+            self.vmcb.save.sfmask = save.sfmask;
+            self.vmcb.save.sysenter_cs = save.sysenter_cs;
+            self.vmcb.save.sysenter_esp = save.sysenter_esp;
+            self.vmcb.save.sysenter_eip = save.sysenter_eip;
+            self.vmcb.save.kernel_gs_base = save.kernel_gs_base;
+
+            debug!("VMLOAD vmcb_gpa={:#x}", vmcb_gpa);
+        })?;
+
+        Ok(())
+    }
+
+    /// Handle VMSAVE intercept: store guest state subset to a VMCB.
+    /// Saves the same fields as VMLOAD loads (APM Vol.2 §15.5.2).
+    #[cfg(feature = "nested")]
+    pub fn handle_vmsave(&mut self) -> HvResult {
+        use super::nested;
+
+        if !self.nested.is_svm_enabled() {
+            return hv_result_err!(EINVAL, "VMSAVE with EFER.SVME=0");
+        }
+
+        let vmcb_gpa = self.guest_regs.rax;
+
+        nested::with_vmcb12_mut(vmcb_gpa, |vmcb| {
+            let save = &mut vmcb.save;
+            // Save segment bases.
+            save.fs.base = self.vmcb.save.fs.base;
+            save.gs.base = self.vmcb.save.gs.base;
+            save.tr.base = self.vmcb.save.tr.base;
+            save.ldtr.base = self.vmcb.save.ldtr.base;
+
+            // Save SYSCALL/SYSENTER MSRs.
+            save.star = self.vmcb.save.star;
+            save.lstar = self.vmcb.save.lstar;
+            save.cstar = self.vmcb.save.cstar;
+            save.sfmask = self.vmcb.save.sfmask;
+            save.sysenter_cs = self.vmcb.save.sysenter_cs;
+            save.sysenter_esp = self.vmcb.save.sysenter_esp;
+            save.sysenter_eip = self.vmcb.save.sysenter_eip;
+            save.kernel_gs_base = self.vmcb.save.kernel_gs_base;
+
+            debug!("VMSAVE vmcb_gpa={:#x}", vmcb_gpa);
+        })?;
+
+        Ok(())
+    }
+
+    /// Handle STGI (set global interrupt flag). Emulated as a per-vCPU flag;
+    /// the real hardware GIF stays set (L0 keeps it enabled).
+    #[cfg(feature = "nested")]
+    pub fn handle_stgi(&mut self) -> HvResult {
+        if !self.nested.is_svm_enabled() {
+            return hv_result_err!(EINVAL, "STGI with EFER.SVME=0");
+        }
+
+        self.nested.gif = true;
+        debug!("STGI");
+        Ok(())
+    }
+
+    /// Handle CLGI (clear global interrupt flag).
+    #[cfg(feature = "nested")]
+    pub fn handle_clgi(&mut self) -> HvResult {
+        if !self.nested.is_svm_enabled() {
+            return hv_result_err!(EINVAL, "CLGI with EFER.SVME=0");
+        }
+
+        self.nested.gif = false;
+        debug!("CLGI");
+        Ok(())
+    }
 }
 
 impl Vcpu {

@@ -197,6 +197,46 @@ impl VmExit<'_> {
                 1 => self.handle_msr_write(),
                 _ => hv_result_err!(EIO),
             },
+            #[cfg(feature = "nested")]
+            SvmExitCode::VMRUN => {
+                let res = self.cpu_data.vcpu.handle_vmrun();
+                if res.is_ok() {
+                    self.advance_rip()?;
+                }
+                res
+            }
+            #[cfg(feature = "nested")]
+            SvmExitCode::VMLOAD => {
+                let res = self.cpu_data.vcpu.handle_vmload();
+                if res.is_ok() {
+                    self.advance_rip()?;
+                }
+                res
+            }
+            #[cfg(feature = "nested")]
+            SvmExitCode::VMSAVE => {
+                let res = self.cpu_data.vcpu.handle_vmsave();
+                if res.is_ok() {
+                    self.advance_rip()?;
+                }
+                res
+            }
+            #[cfg(feature = "nested")]
+            SvmExitCode::STGI => {
+                let res = self.cpu_data.vcpu.handle_stgi();
+                if res.is_ok() {
+                    self.advance_rip()?;
+                }
+                res
+            }
+            #[cfg(feature = "nested")]
+            SvmExitCode::CLGI => {
+                let res = self.cpu_data.vcpu.handle_clgi();
+                if res.is_ok() {
+                    self.advance_rip()?;
+                }
+                res
+            }
             SvmExitCode::IOIO => {
                 // EXITINFO1 (SVM Ref. Manual §2): bits 31:16 = port number,
                 // bit 0 = TYPE (1 = IN, 0 = OUT), bit 4 = SZ8, bit 5 = SZ16,

@@ -24,6 +24,17 @@
 //! (`VM_CR`, `VM_HSAVE_PA`) plus the `EFER.SVME` intent bit. The VMRUN
 //! emulation that actually runs an L2 lands in later milestones; until then
 //! a guest VMRUN still traps to the monitor and is refused.
+//!
+//! M2 adds VMRUN/VMLOAD/VMSAVE/STGI/CLGI interception handlers, VMCB12 access
+//! infrastructure (GPA → HPA translation), and the state machine for tracking
+//! the active VMCB12. VMRUN does not yet launch L2 (blocked at entry); M3+ will
+//! complete the merge and L2 execution path.
+
+use libvmm::svm::Vmcb;
+
+use crate::error::HvResult;
+use crate::memory::addr::{GuestPhysAddr, HostPhysAddr};
+use crate::memory::{GenericPageTableImmut, PAGE_SIZE};
 
 /// `VM_CR` (0xC001_0114, AMD APM Vol.2 §15.30.1). KVM reads it to decide
 /// whether SVM is usable.
@@ -110,8 +121,13 @@ pub struct NestedSvmState {
     /// Guest-physical address the guest wrote to `VM_HSAVE_PA`.
     pub hsave_pa: u64,
     /// Whether an L2 is currently running on this vCPU (VMCB02 active).
-    /// Later milestones set this across a VMRUN; M1 never runs an L2.
     pub in_l2: bool,
+    /// Guest-physical address of the currently active VMCB12 (L1's VMCB for L2).
+    /// Valid only when `in_l2` is true.
+    pub vmcb12_gpa: u64,
+    /// Global interrupt flag (GIF) state for L1. STGI/CLGI emulation toggles
+    /// this; it does not control the real hardware GIF (which L0 keeps set).
+    pub gif: bool,
 }
 
 impl NestedSvmState {
@@ -120,6 +136,8 @@ impl NestedSvmState {
             efer_svme: false,
             hsave_pa: 0,
             in_l2: false,
+            vmcb12_gpa: 0,
+            gif: true,
         }
     }
 
@@ -146,6 +164,89 @@ impl NestedSvmState {
             _ => false,
         }
     }
+
+    /// Check whether the guest has enabled SVM (`EFER.SVME` set). Used to
+    /// guard VMRUN/VMLOAD/VMSAVE/STGI/CLGI: they raise #UD if SVME is clear.
+    pub fn is_svm_enabled(&self) -> bool {
+        self.efer_svme
+    }
+
+    /// Clear all nested state when the guest disables SVM.
+    pub fn clear(&mut self) {
+        self.efer_svme = false;
+        self.hsave_pa = 0;
+        self.in_l2 = false;
+        self.vmcb12_gpa = 0;
+        self.gif = true;
+    }
+}
+
+/// Translate a guest-physical address to a host-physical address using the
+/// root cell's GPM (guest page map). Returns `None` if the GPA is not mapped
+/// or points to a region L0 must hide from L1 (safe memory, EPC).
+///
+/// Used to access VMCB12 (L1's VMCB structure in L1's physical memory) and
+/// the MSRPM/IOPM bitmaps L1 points to.
+pub fn gpa_to_hpa(gpa: GuestPhysAddr) -> HvResult<HostPhysAddr> {
+    use crate::cell::ROOT_CELL;
+
+    let root_cell = ROOT_CELL.get().ok_or(hv_result_err!(ENODEV, "ROOT_CELL not initialized"))?;
+    let gpm = root_cell.gpm.lock();
+
+    // Walk the GPM to translate GPA → HPA. The GPM is L0's view of what the
+    // guest can see; if the GPA is unmapped or points to a protected region
+    // (security memory, EPC), the walk fails and we refuse the access.
+    let hpa = gpm
+        .translate(gpa)
+        .map_err(|_| hv_result_err!(EFAULT, "VMCB12 GPA {:#x} not mapped in GPM", gpa))?;
+
+    Ok(hpa)
+}
+
+/// Access a VMCB12 at the given GPA, translating it to HPA and mapping it
+/// read-only into the monitor's address space. Returns a reference with
+/// lifetime tied to the closure, so the mapping is dropped when done.
+///
+/// VMCB must be 4K-aligned (SVM requirement). Returns `EINVAL` if misaligned.
+pub fn with_vmcb12<F, R>(vmcb12_gpa: u64, f: F) -> HvResult<R>
+where
+    F: FnOnce(&Vmcb) -> R,
+{
+    // Check 4K alignment (SVM APM Vol.2 §15.5: VMCB must be page-aligned).
+    if vmcb12_gpa & (PAGE_SIZE as u64 - 1) != 0 {
+        return hv_result_err!(EINVAL, "VMCB12 GPA {:#x} not 4K-aligned", vmcb12_gpa);
+    }
+
+    let hpa = gpa_to_hpa(GuestPhysAddr::from(vmcb12_gpa))?;
+
+    // Map the HPA as read-only. The Vmcb structure is repr(C, align(4096))
+    // and exactly one page, so we can safely cast the pointer.
+    // SAFETY: HPA comes from a valid GPM translation, the page is guest-owned
+    // (not safe memory), and we hold no locks that the closure could deadlock.
+    let vmcb12_ptr = crate::memory::addr::phys_to_virt(hpa.as_usize()) as *const Vmcb;
+    let vmcb12 = unsafe { &*vmcb12_ptr };
+
+    Ok(f(vmcb12))
+}
+
+/// Mutable variant of `with_vmcb12` for writes (used when reflecting L2 state
+/// back to VMCB12 after an exit, or for VMLOAD/VMSAVE).
+pub fn with_vmcb12_mut<F, R>(vmcb12_gpa: u64, f: F) -> HvResult<R>
+where
+    F: FnOnce(&mut Vmcb) -> R,
+{
+    if vmcb12_gpa & (PAGE_SIZE as u64 - 1) != 0 {
+        return hv_result_err!(EINVAL, "VMCB12 GPA {:#x} not 4K-aligned", vmcb12_gpa);
+    }
+
+    let hpa = gpa_to_hpa(GuestPhysAddr::from(vmcb12_gpa))?;
+
+    // SAFETY: Same as read-only version, but now we allow mutation. The guest
+    // owns this page and expects L0 to write to it (VMRUN semantics).
+    let vmcb12_ptr = crate::memory::addr::phys_to_virt(hpa.as_usize()) as *mut Vmcb;
+    let vmcb12 = unsafe { &mut *vmcb12_ptr };
+
+    Ok(f(vmcb12))
 }
 
 #[cfg(test)]
@@ -194,5 +295,34 @@ mod tests {
         let s = NestedSvmState::new();
         assert!(!s.efer_svme);
         assert!(!s.in_l2);
+        assert_eq!(s.vmcb12_gpa, 0);
+        assert!(s.gif); // GIF defaults to set (enabled).
+    }
+
+    #[test]
+    fn test_svm_enable_guard() {
+        let mut s = NestedSvmState::new();
+        assert!(!s.is_svm_enabled());
+
+        s.efer_svme = true;
+        assert!(s.is_svm_enabled());
+    }
+
+    #[test]
+    fn test_clear_resets_all_state() {
+        let mut s = NestedSvmState::new();
+        s.efer_svme = true;
+        s.hsave_pa = 0x1234_5000;
+        s.in_l2 = true;
+        s.vmcb12_gpa = 0x8000_0000;
+        s.gif = false;
+
+        s.clear();
+
+        assert!(!s.efer_svme);
+        assert_eq!(s.hsave_pa, 0);
+        assert!(!s.in_l2);
+        assert_eq!(s.vmcb12_gpa, 0);
+        assert!(s.gif);
     }
 }
