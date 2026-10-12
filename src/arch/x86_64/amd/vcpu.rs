@@ -325,6 +325,10 @@ impl Vcpu {
 
         let vmcb12_gpa = self.guest_regs.rax;
 
+        // Step 1: Backup VMCB01 (current VMCB state = L1's state).
+        let vmcb01_backup = alloc::boxed::Box::new(self.vmcb.clone());
+        self.nested.vmcb01_backup = Some(vmcb01_backup);
+
         // Access VMCB12 and perform the merge.
         nested::with_vmcb12(vmcb12_gpa, |vmcb12| {
             // Allocate ASID for L2.

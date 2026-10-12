@@ -134,6 +134,9 @@ pub struct NestedSvmState {
     /// ASID counter for L2. Starts at 2 (ASID 1 is reserved for VMCB01/L1).
     /// Increments on each VMRUN to avoid TLB conflicts.
     pub next_l2_asid: u32,
+    /// Backup of VMCB01 (L1's VMCB) before running L2. Used to restore L1
+    /// state when reflecting an exit back to L1.
+    pub vmcb01_backup: Option<alloc::boxed::Box<Vmcb>>,
 }
 
 impl NestedSvmState {
@@ -146,6 +149,7 @@ impl NestedSvmState {
             gif: true,
             nnpt_cache: NestedPageTableCache::new(),
             next_l2_asid: 2, // ASID 1 is for L1 (VMCB01).
+            vmcb01_backup: None,
         }
     }
 
@@ -188,6 +192,7 @@ impl NestedSvmState {
         self.gif = true;
         self.nnpt_cache.invalidate_all();
         self.next_l2_asid = 2;
+        self.vmcb01_backup = None;
     }
 
     /// Allocate a new ASID for L2. Wraps around if it reaches the maximum.

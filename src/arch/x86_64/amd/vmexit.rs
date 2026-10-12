@@ -249,16 +249,27 @@ impl VmExit<'_> {
             let vmcb12_gpa = self.cpu_data.vcpu.nested.vmcb12_gpa;
             let vmcb02 = &self.cpu_data.vcpu.vmcb;
 
-            // TODO: Save VMCB01 reference for proper restoration.
-            // For M4, we use a dummy VMCB01 (will be fixed in cleanup).
-            let dummy_vmcb01 = unsafe { core::mem::zeroed() };
+            // Get the backed-up VMCB01 (L1's state before VMRUN).
+            let vmcb01 = self
+                .cpu_data
+                .vcpu
+                .nested
+                .vmcb01_backup
+                .as_ref()
+                .ok_or(hv_result_err!(EIO, "VMCB01 backup missing"))?;
 
-            super::exit_reflection::reflect_exit_to_l1(vmcb02, vmcb12_gpa, &dummy_vmcb01)?;
+            super::exit_reflection::reflect_exit_to_l1(vmcb02, vmcb12_gpa, vmcb01)?;
+
+            // Restore VMCB01 to continue running L1.
+            self.cpu_data.vcpu.vmcb = *vmcb01.clone();
 
             // Mark that we're no longer in L2.
             self.cpu_data.vcpu.nested.in_l2 = false;
 
-            debug!("Reflected L2 exit to L1: exit_code={:#x}", exit_info.exit_code);
+            debug!(
+                "Reflected L2 exit to L1: exit_code={:#x}",
+                exit_info.exit_code
+            );
             return Ok(());
         }
 
