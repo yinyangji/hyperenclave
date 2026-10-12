@@ -281,6 +281,27 @@ pub static MSR_POLICY_TABLE: &[MsrEntry] = &[
         write: MsrAction::Passthrough,
         name: "AMD_HWCR",
     },
+    // Nested-SVM capability MSRs (AMD, `nested` only). Routed to the VMCB
+    // vendor layer (`rdmsr_virt`/`wrmsr_virt`), where the per-vCPU
+    // `NestedSvmState` serves VM_CR as "SVM usable" and stores the guest's
+    // VM_HSAVE_PA. Absent when nesting is off, so the table stays identical
+    // to the non-nested build and these MSRs keep their fail-closed default.
+    #[cfg(all(feature = "nested", feature = "amd"))]
+    MsrEntry {
+        first: 0xc001_0114,
+        last: 0xc001_0114,
+        read: MsrAction::AreaSwap,
+        write: MsrAction::AreaSwap,
+        name: "VM_CR",
+    },
+    #[cfg(all(feature = "nested", feature = "amd"))]
+    MsrEntry {
+        first: 0xc001_0117,
+        last: 0xc001_0117,
+        read: MsrAction::AreaSwap,
+        write: MsrAction::AreaSwap,
+        name: "VM_HSAVE_PA",
+    },
 ];
 
 /// Look up the policy entry covering `msr`; `None` means "unknown MSR",

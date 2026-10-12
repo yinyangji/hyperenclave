@@ -46,6 +46,10 @@ pub struct Vcpu {
     msrpm: MsrPermissionMap,
     /// I/O permission map backing the IOIO_PROT interception.
     iopm: IoPermissionMap,
+    /// Per-vCPU nested-SVM state (capability intent + L2 bookkeeping).
+    /// Present only with the `nested` feature; see `nested.rs`.
+    #[cfg(feature = "nested")]
+    pub(super) nested: super::nested::NestedSvmState,
     /// Virtual machine control block.
     pub(super) vmcb: Vmcb,
 }
@@ -202,6 +206,8 @@ impl Vcpu {
             host_save_area,
             msrpm,
             iopm,
+            #[cfg(feature = "nested")]
+            nested: super::nested::NestedSvmState::new(),
             host_stack_top: PerCpu::from_local_base().stack_top() as _,
             vmcb: Default::default(),
         };
@@ -468,14 +474,31 @@ impl VcpuAccessGuestState for Vcpu {
     // VMRUN), so the MSRPM routes every access here and the handlers
     // read/write the VMCB save fields that VMRUN loads.
     fn rdmsr_virt(&self, msr: u32) -> Option<u64> {
+        // Nested-SVM capability MSRs (VM_CR / VM_HSAVE_PA) are served from
+        // the per-vCPU nested state when nesting is on.
+        #[cfg(feature = "nested")]
+        if let Some(val) = self.nested.rdmsr(msr) {
+            return Some(val);
+        }
         let save = &self.vmcb.save;
         match msr {
             0x174 => Some(save.sysenter_cs),
             0x175 => Some(save.sysenter_esp),
             0x176 => Some(save.sysenter_eip),
             0x277 => Some(save.g_pat),
-            // SVME is the hypervisor's own EFER bit; the guest never sees it.
-            0xc000_0080 => Some(save.efer & !EferFlags::SECURE_VIRTUAL_MACHINE_ENABLE.bits()),
+            // SVME is the hypervisor's own EFER bit. With nesting off the
+            // guest never sees it; with nesting on it reads back its own
+            // intent value so KVM can tell its `EFER.SVME=1` write took.
+            0xc000_0080 => {
+                let efer = save.efer & !EferFlags::SECURE_VIRTUAL_MACHINE_ENABLE.bits();
+                #[cfg(feature = "nested")]
+                let efer = if self.nested.efer_svme {
+                    efer | super::nested::EFER_SVME
+                } else {
+                    efer
+                };
+                Some(efer)
+            }
             0xc000_0081 => Some(save.star),
             0xc000_0082 => Some(save.lstar),
             0xc000_0083 => Some(save.cstar),
@@ -488,6 +511,11 @@ impl VcpuAccessGuestState for Vcpu {
     }
 
     fn wrmsr_virt(&mut self, msr: u32, val: u64) -> HvResult {
+        // Nested-SVM capability MSRs are consumed by the nested state.
+        #[cfg(feature = "nested")]
+        if self.nested.wrmsr(msr, val) {
+            return Ok(());
+        }
         let save = &mut self.vmcb.save;
         match msr {
             0x174 => save.sysenter_cs = val,
@@ -500,6 +528,12 @@ impl VcpuAccessGuestState for Vcpu {
                 // VMRUN would fail its consistency checks. (SCE arbitration
                 // for HU-Enclave hooks in here later.)
                 const EFER_WRITABLE: u64 = 0x1 | 1 << 11 | 1 << 14; // SCE | NXE | FFXSR
+                                                                    // With nesting on, record the guest's SVME intent (the real
+                                                                    // EFER keeps SVME set); the guest reads it back via rdmsr_virt.
+                #[cfg(feature = "nested")]
+                {
+                    self.nested.efer_svme = val & super::nested::EFER_SVME != 0;
+                }
                 save.efer = (save.efer & !EFER_WRITABLE) | (val & EFER_WRITABLE);
             }
             0xc000_0081 => save.star = val,

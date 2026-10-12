@@ -12,6 +12,12 @@ amd = ["libvmm/svm"]
 stats = []
 sme = ["amd"]
 enclave_interrupt = []
+# Nested virtualization: let the downgraded host run its own hypervisor
+# (KVM) and create VMs (the CVM of the HyperGPU L0/L1/L2 model). Off by
+# default; when off the build is bit-identical to a non-nested monitor
+# (VMX/SVM stay hidden from the guest). See docs/nested-svm-design.md
+# (AMD) and docs/nested-vmx-design.md (Intel).
+nested = []
 epc48 = []
 epc96 = []
 epc144 = []

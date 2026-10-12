@@ -346,9 +346,21 @@ fn apply_masks(leaf: u32, subleaf: u32, regs: &mut CpuidRegs, guest_osxsave: boo
         // Leaf 0x80000001: AMD extended feature flags.
         0x8000_0001 => {
             let mut flags = FeatureInfoFlags::from_bits_truncate(regs.ecx as u64);
-            // The guest must not enable SVM itself; the monitor owns it.
+            // The guest owns SVM only with nested virtualization enabled;
+            // otherwise the monitor keeps it hidden so the guest cannot
+            // execute VMRUN and crash the machine (nested-svm-design.md §0).
+            #[cfg(not(all(feature = "nested", feature = "amd")))]
             flags.remove(FeatureInfoFlags::SVM);
             regs.ecx = flags.bits() as u32;
+        }
+        // Leaf 0x8000000A: SVM revision and feature identification. Only
+        // reached on AMD. With nesting on, report the revision/ASID count
+        // as-is but mask the feature set (EDX) down to what the monitor can
+        // faithfully merge into VMCB02; with nesting off the leaf never
+        // matters because the SVM feature bit above is hidden.
+        #[cfg(all(feature = "nested", feature = "amd"))]
+        0x8000_000a => {
+            regs.edx = crate::arch::vmm::nested::mask_svm_features(regs.edx);
         }
         // Leaf 0x80000008: address sizes. Pin them to what the nested page
         // tables (EPT/NPT, 4 levels) actually support. LA57 activation is
@@ -488,8 +500,26 @@ mod tests {
             ..Default::default()
         };
         apply_masks(0x8000_0001, 0, &mut r, false, false);
+        // SVM is hidden unless nested virtualization is compiled in (then the
+        // guest's own KVM owns it); the unrelated bit is preserved regardless.
+        #[cfg(not(all(feature = "nested", feature = "amd")))]
         assert_eq!(r.ecx & FeatureInfoFlags::SVM.bits() as u32, 0);
+        #[cfg(all(feature = "nested", feature = "amd"))]
+        assert_ne!(r.ecx & FeatureInfoFlags::SVM.bits() as u32, 0);
         assert_ne!(r.ecx & 0x100, 0);
+    }
+
+    #[cfg(all(feature = "nested", feature = "amd"))]
+    #[test]
+    fn test_nested_masks_svm_features() {
+        // Leaf 0x8000000A EDX: nested paging survives, AVIC is stripped.
+        let mut r = CpuidRegs {
+            edx: 0xffff_ffff,
+            ..Default::default()
+        };
+        apply_masks(0x8000_000a, 0, &mut r, false, false);
+        assert_ne!(r.edx & (1 << 0), 0, "nested paging must be reported");
+        assert_eq!(r.edx & (1 << 13), 0, "AVIC must be hidden");
     }
 
     #[test]

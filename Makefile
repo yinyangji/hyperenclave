@@ -45,6 +45,7 @@ LOG ?=
 STATS ?= off
 SME ?= on
 INTR ?= on
+NESTED ?= off
 
 # do not support debug mode
 MODE := release
@@ -56,6 +57,7 @@ export VENDOR
 export STATS
 export SME
 export INTR
+export NESTED
 
 OBJDUMP ?= objdump
 OBJCOPY ?= objcopy
@@ -87,6 +89,10 @@ endif
 
 ifeq ($(INTR), on)
   features += enclave_interrupt
+endif
+
+ifeq ($(NESTED), on)
+  features += nested
 endif
 
 build_args := --features "$(features)" --target $(ARCH).json -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem

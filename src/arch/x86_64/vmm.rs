@@ -33,6 +33,11 @@ pub use vendor::{
 #[cfg(feature = "amd")]
 pub use vendor::{EncHW, HmacSWEncHW};
 
+/// Nested-SVM support (AMD), exposed to the common CPUID/MSR layers through
+/// the sanctioned vendor re-export so they never name `amd::` directly.
+#[cfg(all(feature = "nested", feature = "amd"))]
+pub use vendor::nested;
+
 pub trait VcpuAccessGuestState {
     // Architecture independent methods:
     fn regs(&self) -> &GuestRegisters;

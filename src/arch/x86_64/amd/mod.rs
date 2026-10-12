@@ -15,6 +15,8 @@
 mod enclave;
 mod iommu;
 mod mem_encrypt;
+#[cfg(feature = "nested")]
+pub mod nested;
 mod npt;
 mod vcpu;
 mod vmexit;
