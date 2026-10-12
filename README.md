@@ -39,13 +39,21 @@ We have successfully built HyperEnclave and performed tests on the following CPU
 - ZHAOXIN KX-6000 @3.0GHz
 
 
-# Repositories
+# 代码仓库 / Repositories
+
+本仓库同时维护在 GitHub 与 Gitee 两个镜像，提交代码时请保持两边同步：
 
 - GitHub: https://github.com/yinyangji/hyperenclave.git
-- Gitee (mirror): https://gitee.com/taijichen/isc_gpu.git
+- Gitee 镜像: https://gitee.com/taijichen/isc_gpu.git
 
-For the currently active task context, including the HyperGPU / DataFun article
-alignment and the QEMU nested-test plan, see [`RUNBOOK.md`](./RUNBOOK.md).
+```bash
+# 同步到两端
+git push origin master
+git push gitee  master
+```
+
+当前进行中的任务上下文（HyperGPU / DataFun 文章对齐、QEMU 嵌套测试计划）请见
+[`RUNBOOK.md`](./RUNBOOK.md)。
 
 # Quick start
 
