@@ -20,6 +20,7 @@ mod heap;
 mod mapper;
 mod mm;
 mod mmio;
+pub mod nested_pt;
 mod paging;
 
 use crate::cell::ROOT_CELL;
@@ -33,6 +34,7 @@ pub use frame::Frame;
 pub use heap::{HV_HEAP_SIZE, HV_HEAP_START_HVA};
 pub use mm::{MemoryRegion, MemorySet};
 pub use mmio::Mmio;
+pub use nested_pt::{NestedPageTable, NestedPageTableCache};
 pub use paging::{EmptyPagingInstr, GenericPTE, PageSize, PageTableLevel, PagingInstr};
 pub use paging::{
     GenericPageTable, GenericPageTableImmut, GenericPageTableMut, Level4PageTable,

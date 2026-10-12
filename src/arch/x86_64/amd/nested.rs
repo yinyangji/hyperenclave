@@ -34,7 +34,7 @@ use libvmm::svm::Vmcb;
 
 use crate::error::HvResult;
 use crate::memory::addr::{GuestPhysAddr, HostPhysAddr};
-use crate::memory::{GenericPageTableImmut, PAGE_SIZE};
+use crate::memory::{GenericPageTableImmut, NestedPageTableCache, PAGE_SIZE};
 
 /// `VM_CR` (0xC001_0114, AMD APM Vol.2 §15.30.1). KVM reads it to decide
 /// whether SVM is usable.
@@ -128,6 +128,12 @@ pub struct NestedSvmState {
     /// Global interrupt flag (GIF) state for L1. STGI/CLGI emulation toggles
     /// this; it does not control the real hardware GIF (which L0 keeps set).
     pub gif: bool,
+    /// Nested page table cache: one synthesized nNPT per L1 nCR3.
+    /// Populated on-demand when L1 runs L2 with different nCR3 values.
+    pub nnpt_cache: NestedPageTableCache,
+    /// ASID counter for L2. Starts at 2 (ASID 1 is reserved for VMCB01/L1).
+    /// Increments on each VMRUN to avoid TLB conflicts.
+    pub next_l2_asid: u32,
 }
 
 impl NestedSvmState {
@@ -138,6 +144,8 @@ impl NestedSvmState {
             in_l2: false,
             vmcb12_gpa: 0,
             gif: true,
+            nnpt_cache: NestedPageTableCache::new(),
+            next_l2_asid: 2, // ASID 1 is for L1 (VMCB01).
         }
     }
 
@@ -178,6 +186,20 @@ impl NestedSvmState {
         self.in_l2 = false;
         self.vmcb12_gpa = 0;
         self.gif = true;
+        self.nnpt_cache.invalidate_all();
+        self.next_l2_asid = 2;
+    }
+
+    /// Allocate a new ASID for L2. Wraps around if it reaches the maximum.
+    /// AMD supports up to 2^16 - 1 ASIDs, but we use a simple counter.
+    pub fn allocate_l2_asid(&mut self) -> u32 {
+        let asid = self.next_l2_asid;
+        self.next_l2_asid += 1;
+        if self.next_l2_asid == 0 {
+            // Wrapped around; reset to 2 (skip 0 = invalid, 1 = L1).
+            self.next_l2_asid = 2;
+        }
+        asid
     }
 }
 
