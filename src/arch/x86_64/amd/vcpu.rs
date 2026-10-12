@@ -50,6 +50,12 @@ pub struct Vcpu {
     /// Present only with the `nested` feature; see `nested.rs`.
     #[cfg(feature = "nested")]
     pub(super) nested: super::nested::NestedSvmState,
+    /// Merged MSRPM for L2 (L0 policy | L1 bitmap). Only with `nested` feature.
+    #[cfg(feature = "nested")]
+    merged_msrpm: MsrPermissionMap,
+    /// Merged IOPM for L2 (L0 policy | L1 bitmap). Only with `nested` feature.
+    #[cfg(feature = "nested")]
+    merged_iopm: IoPermissionMap,
     /// Virtual machine control block.
     pub(super) vmcb: Vmcb,
 }
@@ -208,6 +214,10 @@ impl Vcpu {
             iopm,
             #[cfg(feature = "nested")]
             nested: super::nested::NestedSvmState::new(),
+            #[cfg(feature = "nested")]
+            merged_msrpm: MsrPermissionMap::new()?,
+            #[cfg(feature = "nested")]
+            merged_iopm: IoPermissionMap::new()?,
             host_stack_top: PerCpu::from_local_base().stack_top() as _,
             vmcb: Default::default(),
         };
@@ -306,6 +316,7 @@ impl Vcpu {
     #[cfg(feature = "nested")]
     pub fn handle_vmrun(&mut self) -> HvResult {
         use super::{nested, vmcb_merge};
+        use crate::memory::addr::virt_to_phys;
 
         // Check EFER.SVME: VMRUN with SVME clear raises #UD.
         if !self.nested.is_svm_enabled() {
@@ -324,18 +335,30 @@ impl Vcpu {
             let nnpt = self.nested.nnpt_cache.get_or_create(l1_ncr3)?;
             let nnpt_root = nnpt.root_paddr().as_usize() as u64;
 
+            // Merge MSRPM: L0 policy | L1 bitmap.
+            let l0_msrpm = self.msrpm.frame.as_slice();
+            let merged_msrpm_slice = self.merged_msrpm.frame.as_slice_mut();
+            vmcb_merge::merge_msrpm(
+                unsafe { &mut *(merged_msrpm_slice.as_mut_ptr() as *mut [u8; 8192]) },
+                unsafe { &*(l0_msrpm.as_ptr() as *const [u8; 8192]) },
+                vmcb12.control.msrpm_base_pa,
+            )?;
+
+            // Merge IOPM: L0 policy | L1 bitmap.
+            let l0_iopm = self.iopm.frame.as_slice();
+            let merged_iopm_slice = self.merged_iopm.frame.as_slice_mut();
+            vmcb_merge::merge_iopm(
+                unsafe { &mut *(merged_iopm_slice.as_mut_ptr() as *mut [u8; 12288]) },
+                unsafe { &*(l0_iopm.as_ptr() as *const [u8; 12288]) },
+                vmcb12.control.iopm_base_pa,
+            )?;
+
             // Merge VMCB12 into VMCB02 (this vCPU's VMCB).
-            // Note: This modifies self.vmcb in place. We'll need to save VMCB01
-            // state first in a real implementation, but for M3 we directly overwrite.
             vmcb_merge::merge_vmcb12_to_vmcb02(&mut self.vmcb, vmcb12, l2_asid, nnpt_root)?;
 
-            // TODO M3.2: Merge MSRPM and IOPM.
-            // For now, keep pointing to VMCB01's MSRPM/IOPM (L0 policy only).
-            // Real implementation should call:
-            // vmcb_merge::merge_msrpm(&mut self.merged_msrpm, &self.msrpm, vmcb12.control.msrpm_base_pa)?;
-            // vmcb_merge::merge_iopm(&mut self.merged_iopm, &self.iopm, vmcb12.control.iopm_base_pa)?;
-            // self.vmcb.control.msrpm_base_pa = virt_to_phys(&self.merged_msrpm);
-            // self.vmcb.control.iopm_base_pa = virt_to_phys(&self.merged_iopm);
+            // Point VMCB02 to the merged MSRPM/IOPM.
+            self.vmcb.control.msrpm_base_pa = virt_to_phys(self.merged_msrpm.frame.start_vaddr());
+            self.vmcb.control.iopm_base_pa = virt_to_phys(self.merged_iopm.frame.start_vaddr());
 
             // Mark that we're now running L2.
             self.nested.in_l2 = true;

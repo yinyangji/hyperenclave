@@ -154,6 +154,14 @@ impl VmExit<'_> {
 
     fn handle_nested_page_fault(&mut self, exit_info: &VmExitInfo) -> HvResult {
         let npt_vio_info = NptViolationInfo::from_exit_info(exit_info);
+
+        // Check if we're running L2 (nested mode).
+        #[cfg(feature = "nested")]
+        if self.cpu_data.vcpu.nested.in_l2 {
+            return self.handle_l2_nested_page_fault(npt_vio_info);
+        }
+
+        // L1 nested page fault (normal enclave path).
         if self.cpu_data.state == CpuState::EnclaveRunning {
             let enclave = self.cpu_data.get_current_enclave()?;
             enclave
@@ -165,6 +173,48 @@ impl VmExit<'_> {
             npt_vio_info, exit_info.guest_rip,
         );
         hv_result_err!(ENOSYS)
+    }
+
+    /// Handle L2 nested page fault: synthesize an entry in the nNPT.
+    #[cfg(feature = "nested")]
+    fn handle_l2_nested_page_fault(&mut self, npt_vio_info: NptViolationInfo) -> HvResult {
+        use crate::memory::addr::GuestPhysAddr;
+
+        let l2gpa = GuestPhysAddr::from(npt_vio_info.guest_paddr);
+        let is_write = npt_vio_info.final_translation & 0x2 != 0; // NPT violation bit 1 = write
+
+        // Get L1's nCR3 from the current VMCB02.
+        let vmcb12_gpa = self.cpu_data.vcpu.nested.vmcb12_gpa;
+
+        // Access VMCB12 to get L1's nCR3.
+        let l1_ncr3 = super::nested::with_vmcb12(vmcb12_gpa, |vmcb12| {
+            Ok(vmcb12.control.nest_cr3)
+        })??;
+
+        // Get or create the nNPT for this L1 nCR3.
+        let nnpt = self.cpu_data.vcpu.nested.nnpt_cache.get_or_create(l1_ncr3)?;
+
+        // Handle the page fault: walk L1 nNPT + L0 GPM, synthesize entry.
+        match nnpt.handle_nested_page_fault(l2gpa, l1_ncr3, is_write) {
+            Ok(()) => {
+                debug!(
+                    "L2 #NPF resolved: L2GPA={:#x} L1 nCR3={:#x}",
+                    l2gpa, l1_ncr3
+                );
+                Ok(())
+            }
+            Err(e) if e.code() == EFAULT || e.code() == EACCES => {
+                // L1's nNPT is missing or permissions deny the access.
+                // Reflect the #NPF back to L1 (M4 will implement reflection).
+                warn!(
+                    "L2 #NPF cannot be resolved, needs reflection to L1: {:?}",
+                    e
+                );
+                // TODO M4: Implement reflect_npf_to_l1().
+                hv_result_err!(ENOSYS, "L2 #NPF reflection not implemented (M4)")
+            }
+            Err(e) => Err(e),
+        }
     }
 
     pub fn handle_exit(&mut self) -> HvResult {
