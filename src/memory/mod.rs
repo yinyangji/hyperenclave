@@ -91,6 +91,48 @@ impl AlignedPage2M {
     }
 }
 
+/// A 2MB frame filled with `0xFF`, shared by every region that must read as
+/// absent hardware.
+///
+/// Allocated from the frame allocator rather than declared as a static array:
+/// a 2MB non-zero static would land in `.data` and grow the monitor image by
+/// 2MB, and the allocation also guarantees the 2MB alignment that lets the
+/// page table back these regions with huge pages (`Level4PageTable::map`
+/// only picks a 2MB page when both addresses are 2MB aligned).
+static FF_FRAME: spin::Once<PhysAddr> = spin::Once::new();
+
+/// Physical address of the shared all-ones page.
+///
+/// Returns the zero page's address if the all-ones frame could not be
+/// allocated. That degrades the illusion (the host reads vendor id 0x0000
+/// instead of 0xFFFF) but both read as "no device", so the device stays
+/// hidden either way — much better than failing to boot.
+pub(super) fn ff_page_paddr() -> PhysAddr {
+    *FF_FRAME.call_once(|| match Frame::new_contiguous(512, 21) {
+        Ok(mut frame) => {
+            frame.fill(0xff);
+            let paddr = frame.start_paddr();
+            // The frame is intentionally leaked: it backs mappings that live
+            // as long as the monitor does, and dropping it would free pages
+            // the page tables still point at.
+            core::mem::forget(frame);
+            paddr
+        }
+        Err(e) => {
+            error!(
+                "failed to allocate the all-ones page ({:?}); \
+                 falling back to the zero page for device hiding",
+                e
+            );
+            addr::virt_to_phys(EMPTY_PAGE_FALLBACK.as_ptr() as usize)
+        }
+    })
+}
+
+/// Fallback target for [`ff_page_paddr`]; zero-filled, so it costs no image
+/// space.
+static EMPTY_PAGE_FALLBACK: AlignedPage2M = AlignedPage2M::new();
+
 impl Deref for AlignedPage2M {
     type Target = [u8; PAGE_SIZE * 512];
 

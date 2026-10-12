@@ -18,12 +18,26 @@ use spin::Once;
 use crate::arch::vmm::{IoPageTable, Iommu};
 use crate::cell::ROOT_CELL;
 use crate::config::HvSystemConfig;
+use crate::device::bdf::Bdf;
 use crate::error::HvResult;
 
 pub use crate::config::HvIommuInfo as IommuInfo;
 
 pub trait GenericIommu {
+    /// Point every device at `pt`: the shared default domain that all
+    /// unprotected devices stay in.
     fn set_io_page_table(&self, pt: &IoPageTable) -> HvResult;
+
+    /// Move a single device out of the default domain and into its own.
+    ///
+    /// This is what makes per-accelerator DMA isolation possible: the default
+    /// domain is programmed first for every device, then each protected
+    /// device's entry is overwritten with its private page table and a
+    /// distinct hardware domain id. A domain whose page table is empty
+    /// starves the device of DMA entirely, which is the fail-closed state a
+    /// protected accelerator boots into.
+    fn set_device_page_table(&self, bdf: Bdf, pt: &IoPageTable, domain_id: u16) -> HvResult;
+
     fn set_enabled(&self, enabled: bool) -> HvResult;
 }
 
@@ -40,8 +54,18 @@ pub fn init() -> HvResult {
         info!("Setup IOMMU: {:#x?}", info);
         let iommu = Iommu::new(info)?;
         iommu.set_io_page_table(ROOT_CELL.dma_regions.page_table())?;
-        iommu.set_enabled(true)?;
         list.push(iommu);
+    }
+
+    // Carve the protected accelerators out of the shared domain before
+    // translation is switched on, so there is no window in which they can DMA
+    // with the host's view of memory.
+    if let Some(manager) = crate::device::DEVICE_MANAGER.try_get() {
+        manager.program_iommu(&list)?;
+    }
+
+    for iommu in &list {
+        iommu.set_enabled(true)?;
     }
     IOMMU_LIST.call_once(|| list);
 

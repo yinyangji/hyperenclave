@@ -49,6 +49,15 @@ impl<VA: From<usize> + Into<usize> + Copy> MemoryRegion<VA> {
         }
     }
 
+    /// Physical address this region's first page maps to.
+    ///
+    /// Lets a caller split a region into pieces that keep the original
+    /// virtual-to-physical relationship, without reaching into `Mapper`
+    /// (which is private to the memory module).
+    pub fn target_paddr(&self) -> crate::memory::PhysAddr {
+        self.mapper.map_fn(self.start)
+    }
+
     /// Test whether this region is overlap with `other`.
     fn is_overlap_with(&self, other: &Self) -> bool {
         let p0 = self.start.into();

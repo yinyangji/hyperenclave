@@ -12,9 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use alloc::vec::Vec;
+
 use crate::arch::{vmm::IoPageTable, HostPageTable, NestedPageTable};
 use crate::config::HvSystemConfig;
 use crate::consts::{HV_BASE, PER_CPU_SIZE};
+use crate::device;
 use crate::error::HvResult;
 use crate::header::HvHeader;
 use crate::hypercall::tc::TpmMode;
@@ -112,8 +115,14 @@ impl Cell {
                     }
                 }
             }
-            gpm.insert(r)?;
+            // A protected accelerator's registers must not appear in the
+            // host's view. The driver hands us one region per memory range,
+            // so the device's apertures usually arrive inside a much larger
+            // MMIO region: insert the region in pieces, skipping the parts
+            // the device owns, then map those to the all-ones page.
+            Self::insert_gpm_region_with_device_holes(&mut gpm, r)?;
         }
+        Self::insert_device_sinkholes(&mut gpm)?;
 
         // Init host virtual memory set, create host page table.
         let core_and_percpu_size =
@@ -216,6 +225,89 @@ impl Cell {
         })
     }
 
+    /// Insert `region` into the guest's page table, leaving out any part a
+    /// protected accelerator owns.
+    ///
+    /// The driver describes system memory in large ranges, so a device's
+    /// 4KB configuration page or multi-GB BAR usually sits in the middle of
+    /// one of them. Splitting here (rather than asking the driver for finer
+    /// regions) keeps the kernel ABI untouched.
+    fn insert_gpm_region_with_device_holes(
+        gpm: &mut MemorySet<NestedPageTable>,
+        region: MemoryRegion<GuestPhysAddr>,
+    ) -> HvResult {
+        let holes = device::protected_mmio_ranges();
+        if holes.is_empty() {
+            return gpm.insert(region);
+        }
+
+        let region_start = region.start;
+        let region_end = region_start + region.size;
+        // Physical base of this region, recovered through the mapper so the
+        // split pieces keep the original GPA -> HPA relationship.
+        let phys_base = region.target_paddr();
+
+        // Collect the holes overlapping this region, in address order.
+        let mut overlaps: Vec<(GuestPhysAddr, GuestPhysAddr)> = holes
+            .iter()
+            .map(|&(start, size)| (start, start + size))
+            .filter(|&(start, end)| start < region_end && end > region_start)
+            .map(|(start, end)| (start.max(region_start), end.min(region_end)))
+            .collect();
+        if overlaps.is_empty() {
+            return gpm.insert(region);
+        }
+        overlaps.sort_unstable();
+
+        let mut cursor = region_start;
+        for (hole_start, hole_end) in overlaps {
+            // The hole list may contain adjacent or overlapping entries
+            // (a device with several BARs in one region).
+            if hole_start > cursor {
+                gpm.insert(MemoryRegion::new_with_offset_mapper(
+                    cursor,
+                    phys_base + (cursor - region_start),
+                    hole_start - cursor,
+                    region.flags,
+                ))?;
+            }
+            cursor = cursor.max(hole_end);
+        }
+        if cursor < region_end {
+            gpm.insert(MemoryRegion::new_with_offset_mapper(
+                cursor,
+                phys_base + (cursor - region_start),
+                region_end - cursor,
+                region.flags,
+            ))?;
+        }
+        Ok(())
+    }
+
+    /// Map every protected accelerator's configuration space and BAR
+    /// apertures to the all-ones page.
+    ///
+    /// This runs after the system's own regions so the holes punched above
+    /// are filled by a mapping that reads as absent hardware. Regions the
+    /// driver never described are covered too: a BAR outside every reported
+    /// range would otherwise be unmapped, and an unmapped access faults the
+    /// host instead of quietly reading 0xFF.
+    fn insert_device_sinkholes(gpm: &mut MemorySet<NestedPageTable>) -> HvResult {
+        for (start, size) in device::protected_mmio_ranges() {
+            gpm.insert(MemoryRegion::new_with_ff_mapper(
+                start as GuestPhysAddr,
+                size,
+                MemFlags::READ | MemFlags::WRITE,
+            ))?;
+            info!(
+                "device MMIO [{:#x}, {:#x}) hidden from host (reads 0xFF)",
+                start,
+                start + size
+            );
+        }
+        Ok(())
+    }
+
     /// Whether [gpaddr, gpaddr + 4kB) is accessible by hypervisor.
     pub fn is_valid_normal_world_gpaddr(&self, gpaddr: GuestPhysAddr) -> bool {
         self.normal_world_mem_region.contains(&gpaddr)
@@ -228,6 +320,12 @@ lazy_static! {
 
 pub fn init() -> HvResult {
     crate::arch::vmm::check_hypervisor_feature()?;
+
+    // Enumerate accelerators before the root cell is built: `Cell::new_root()`
+    // needs the device list to decide what to withhold from the guest's
+    // memory view, and this must happen before the host enumerates the bus
+    // itself.
+    device::init()?;
 
     lazy_static::initialize(&ROOT_CELL);
 

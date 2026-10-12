@@ -36,6 +36,7 @@ mod cell;
 mod config;
 mod consts;
 mod cpumask;
+mod device;
 mod enclave;
 mod ffi;
 mod header;

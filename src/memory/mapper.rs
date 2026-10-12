@@ -41,6 +41,22 @@ impl<VA: From<usize> + Into<usize> + Copy> MemoryRegion<VA> {
         Self::new(start, size, flags, Mapper::Fixed(paddr))
     }
 
+    /// Maps `[start, start + size)` onto the shared all-ones page, so the
+    /// region reads as absent hardware and writes are discarded.
+    ///
+    /// Used to withhold a protected accelerator's configuration space and
+    /// BAR apertures from the host's memory view. Writable on purpose: a
+    /// read-only mapping would fault the host's driver probe instead of
+    /// quietly absorbing it, which would be both noisy and a signal that
+    /// something is intercepting.
+    pub fn new_with_ff_mapper(start: VA, size: usize, flags: MemFlags) -> Self {
+        let mut paddr = super::ff_page_paddr();
+        if flags.contains(MemFlags::ENCRYPTED) {
+            paddr = phys_encrypted(paddr);
+        }
+        Self::new(start, size, flags, Mapper::Fixed(paddr))
+    }
+
     pub fn new_with_offset_mapper(
         start_vaddr: VA,
         start_paddr: PhysAddr,

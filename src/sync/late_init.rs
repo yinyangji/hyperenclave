@@ -78,6 +78,20 @@ impl<T> LateInit<T> {
         // this `LateInit` (i.e. `'static` for statics).
         unsafe { (*self.inner.get()).assume_init_ref() }
     }
+
+    /// Returns the value, or `None` if `init()` has not run yet.
+    ///
+    /// Unlike [`Self::get`], this is for callers that legitimately run both
+    /// before and after initialization and have a defined behaviour for the
+    /// uninitialized case — a panic in the monitor takes the whole machine
+    /// down, so "not ready yet" must be expressible without one.
+    pub fn try_get(&self) -> Option<&T> {
+        if !self.inited.load(Ordering::Acquire) {
+            return None;
+        }
+        // SAFETY: same invariant as `get()`.
+        Some(unsafe { (*self.inner.get()).assume_init_ref() })
+    }
 }
 
 #[cfg(test)]
@@ -105,5 +119,14 @@ mod tests {
     fn test_late_init_access_before_init() {
         static L: LateInit<u64> = LateInit::new();
         let _ = L.get();
+    }
+
+    #[test]
+    fn test_late_init_try_get() {
+        static L: LateInit<u64> = LateInit::new();
+        // Before init: no value, and no panic.
+        assert_eq!(L.try_get(), None);
+        unsafe { L.init(7) };
+        assert_eq!(L.try_get(), Some(&7));
     }
 }

@@ -29,6 +29,29 @@ pub use mem_encrypt::{EncHW, HmacSWEncHW};
 pub use npt::{EnclaveNestedPageTableUnlocked, NPTEntry, NestedPageTable};
 pub use vcpu::Vcpu;
 
+/// Locate the PCIe enhanced configuration window (MMCFG).
+///
+/// AMD reports it in `MSR_MMIO_CFG_BASE` (0xC001_0058): bit 0 enables the
+/// window, bits 5:2 encode the bus range as a power of two, and bits 47:20
+/// hold the base (AMD APM Vol.2 §3.2.14).
+pub fn ecam_base() -> Option<usize> {
+    const MSR_MMIO_CFG_BASE: u32 = 0xc001_0058;
+
+    // SAFETY: reading an AMD-defined MSR on an AMD CPU. The monitor runs at
+    // the highest privilege level, and `check_hypervisor_feature` has already
+    // confirmed this is an SVM-capable AMD part.
+    let raw = unsafe { x86::msr::rdmsr(MSR_MMIO_CFG_BASE) };
+    // Bit 0 is MmioCfgEnable.
+    if raw & 1 == 0 {
+        return None;
+    }
+    let base = (raw & 0x0000_ffff_fff0_0000) as usize;
+    if base == 0 {
+        return None;
+    }
+    Some(base)
+}
+
 pub fn check_hypervisor_feature() -> HvResult {
     check_cpuid()?;
     if VmCr::read().contains(VmCrFlags::SVMDIS) {

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 // kernel flags: intel_iommu=off iommu=off intremap=off
+use crate::device::bdf::Bdf;
 use crate::error::HvResult;
 use crate::iommu::{GenericIommu, IommuInfo};
 use crate::memory::addr::{phys_to_virt, virt_to_phys, GuestPhysAddr, HostPhysAddr};
@@ -31,6 +32,10 @@ const ROOT_TABLE_SIZE: usize = 256 * 16;
 const ROOT_TABLE_ENTRY_COUNT: usize = 256;
 const CTX_TABLE_ENTRY_COUNT: usize = 256;
 const INV_QUEUE_SIZE: usize = 4 * 1024; //size 4k
+
+/// Hardware domain id of the shared domain every unprotected device uses.
+/// Protected accelerators get ids from `FIRST_PRIVATE_DOMAIN_ID` upwards.
+const DEFAULT_DOMAIN_ID: u64 = 1;
 
 /// VT-d MMIO registers, 4KB
 ///
@@ -450,12 +455,33 @@ impl IommuInner {
                     | ContextEntryFlags::LEVEL4,
             ); // legacy mode translation enabled
                //  ContextEntryFlags::TT10  | ContextEntryFlags::LEVEL4);//pass through mode, no translation
-            ctx_entrys[i].set_domain_id(1); //all devices use the same memory mapping, thus belongs to one domain
+            ctx_entrys[i].set_domain_id(DEFAULT_DOMAIN_ID); //all devices use the same memory mapping, thus belongs to one domain
         }
         flush_cpu_cache(
             &ctx_entrys[0] as *const CtxTableEntry as usize,
             CONTEXT_TABLE_SIZE,
         ); //flush, or crash!
+    }
+
+    /// Overwrite the context entry of a single device so it translates
+    /// through `root_paddr` under its own `domain_id`.
+    ///
+    /// The context tables are indexed bus-major: `ctx_table_frames[bus]`
+    /// holds 256 entries selected by the device:function byte. Writing just
+    /// that one entry is what separates a protected accelerator from the
+    /// shared domain every other device stays in.
+    fn set_device_context(&mut self, bdf: Bdf, root_paddr: HostPhysAddr, domain_id: u16) {
+        let entry =
+            &mut self.context_table_entries(bdf.bus() as usize)[(bdf.raw() & 0xff) as usize];
+        entry.set_addr(root_paddr);
+        entry.set_flags(
+            ContextEntryFlags::P
+                | ContextEntryFlags::FPD
+                | ContextEntryFlags::TT00
+                | ContextEntryFlags::LEVEL4,
+        );
+        entry.set_domain_id(domain_id as u64);
+        flush_cpu_cache(entry as *const CtxTableEntry as usize, 16);
     }
     fn send_invalidation(&mut self, inv_command: u128) {
         let ptr = self.inv_queue_frame.as_mut_ptr() as _;
@@ -523,6 +549,31 @@ impl GenericIommu for Iommu {
     fn set_io_page_table(&self, pt: &IoPageTable) -> HvResult {
         //iterate each context table and iterate each context entry
         self.inner.lock().set_io_page_table(pt)?;
+        Ok(())
+    }
+
+    fn set_device_page_table(&self, bdf: Bdf, pt: &IoPageTable, domain_id: u16) -> HvResult {
+        if domain_id == DEFAULT_DOMAIN_ID as u16 {
+            return hv_result_err!(
+                EINVAL,
+                format!("domain id {} is reserved for the shared domain", domain_id)
+            );
+        }
+        let mut inner = self.inner.lock();
+        inner.set_device_context(bdf, pt.root_paddr(), domain_id);
+        // The context entry just changed, so the context cache may still hold
+        // the old domain/page-table pair for this device, and the IOTLB may
+        // hold translations made under it. Both are flushed globally (the
+        // granular descriptors are an optimisation this boot-time path does
+        // not need).
+        //
+        // Only safe once queued invalidation is running, which happens in
+        // `set_enabled(true)`; before that the tables are simply not live yet
+        // and no stale entry can exist.
+        if inner.regs.global_status.read() & CmdStsFlags::TE.bits() != 0 {
+            inner.send_invalidation(IommuInner::CONTEXT_INV);
+            inner.send_invalidation(IommuInner::IOTLB_INV);
+        }
         Ok(())
     }
 

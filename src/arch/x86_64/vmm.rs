@@ -90,6 +90,19 @@ const CR0_RESERVED: u64 = !Cr0Flags::all().bits();
 /// reserved (Intel SDM Vol.3 §2.5, AMD APM Vol.2).
 const CR4_RESERVED: u64 = !Cr4Flags::all().bits();
 
+/// Physical base of the PCIe enhanced configuration (ECAM/MMCFG) window.
+///
+/// Located per vendor, because the firmware reports it in a vendor-specific
+/// register rather than anywhere architectural: Intel exposes PCIEXBAR in the
+/// host bridge's configuration space, AMD puts it in an MSR. The monitor
+/// cannot read the ACPI MCFG table that Linux uses, having no ACPI parser.
+///
+/// `None` means the window could not be located; callers must then rely on
+/// the legacy port pair alone.
+pub fn ecam_base() -> Option<usize> {
+    vendor::ecam_base()
+}
+
 pub(super) struct VmExit<'a> {
     pub cpu_data: &'a mut PerCpu,
 }

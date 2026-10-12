@@ -20,6 +20,7 @@ mod entry;
 mod exception;
 mod msr;
 mod page_table;
+mod pci_cfg;
 mod pio;
 mod policy_stats;
 mod segmentation;
@@ -35,6 +36,9 @@ pub use cpuid::CpuidPolicy;
 pub use enclave::{EnclaveExceptionInfo, EnclavePFErrorCode, EnclaveThreadState};
 pub use exception::{ExceptionInfo, ExceptionType, PageFaultErrorCode};
 pub use msr::VcpuMsrState;
+pub use pci_cfg::LegacyPciConfig as PciConfig;
+pub use vmm::ecam_base;
+
 pub use page_table::PageTable as HostPageTable;
 pub use page_table::PageTable as GuestPageTable;
 pub use page_table::PageTableImmut as GuestPageTableImmut;
