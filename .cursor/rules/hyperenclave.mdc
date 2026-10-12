@@ -6,7 +6,7 @@ alwaysApply: true
 
 # HyperEnclave 开发规范
 
-开始任务前先阅读仓库根目录的 `AGENTS.md`（唯一真实源）与 `SKILL.md`（操作流程索引，具体步骤在 `.claude/skills/`）。核心规则：
+开始任务前先阅读仓库根目录的 `RUNBOOK.md`（当前任务手册），然后阅读 `AGENTS.md`（唯一真实源）与 `SKILL.md`（操作流程索引，具体步骤在 `.claude/skills/`）。核心规则：
 
 ## 项目性质
 
