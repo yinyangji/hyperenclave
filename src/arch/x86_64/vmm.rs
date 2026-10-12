@@ -122,8 +122,8 @@ impl VmExit<'_> {
         super::msr::handle_wrmsr(self.cpu_data)
     }
 
-    pub fn handle_pio(&mut self, port: u16, is_read: bool, instr_len: u8) -> HvResult {
-        super::pio::handle_pio(self.cpu_data, port, is_read, instr_len)
+    pub fn handle_pio(&mut self, port: u16, is_read: bool, size: u8, instr_len: u8) -> HvResult {
+        super::pio::handle_pio(self.cpu_data, port, is_read, size, instr_len)
     }
 
     pub fn handle_cpuid(&mut self) -> HvResult {

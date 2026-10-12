@@ -276,8 +276,11 @@ impl CpuidPolicy {
     }
 
     /// Serve one CPUID query: return the registers the guest must see.
-    /// `guest_osxsave` mirrors the guest CR4.OSXSAVE (the XSETBV
-    /// interception keeps the real XCR0 authoritative for the guest OS).
+    /// `guest_osxsave` is read from the guest's CR4 at the CPUID exit:
+    /// CR4 passes through to the hardware, so the bit is whatever the
+    /// guest OS actually set. XSETBV is not intercepted either — the
+    /// guest's XCR0 writes land on the real XCR0, which therefore needs
+    /// no emulation to stay in sync.
     pub fn emulate(&self, leaf: u32, subleaf: u32, guest_osxsave: bool) -> CpuidRegs {
         // Self-identification. In stealth mode it is skipped and the
         // fall-through reports the bare-metal values (no hypervisor leaf).
@@ -314,8 +317,9 @@ fn apply_masks(leaf: u32, subleaf: u32, regs: &mut CpuidRegs, guest_osxsave: boo
             let mut flags = FeatureInfoFlags::from_bits_truncate(regs.ecx as u64);
             // The guest must not enable VMX itself; the monitor owns it.
             flags.remove(FeatureInfoFlags::VMX);
-            // OSXSAVE mirrors the guest CR4 (the XSETBV hypercall keeps
-            // the real XCR0 in sync).
+            // OSXSAVE reports the guest's own CR4 bit. XSETBV is not
+            // intercepted: the guest runs with the real XCR0, so the bit
+            // it set in CR4 is the truth about its xsave state.
             if guest_osxsave {
                 flags.insert(FeatureInfoFlags::OSXSAVE);
             } else {

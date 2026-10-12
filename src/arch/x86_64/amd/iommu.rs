@@ -18,6 +18,7 @@ use core::fmt;
 use bitflags::bitflags;
 use spin::Mutex;
 
+use crate::device::bdf::Bdf;
 use crate::error::HvResult;
 use crate::iommu::{GenericIommu, IommuInfo};
 use crate::memory::addr::{phys_encrypted, phys_to_virt, GuestPhysAddr, HostPhysAddr};
@@ -327,6 +328,22 @@ impl GenericIommu for Iommu {
         for entry in inner.dev_table_entries() {
             entry.set_table_root(pt.root_paddr());
         }
+        Ok(())
+    }
+
+    fn set_device_page_table(&self, bdf: Bdf, pt: &IoPageTable, _domain_id: u16) -> HvResult {
+        // The AMD device table entry has no domain-id field in the
+        // basic-translation format this driver programs; isolation comes
+        // from the private page-table root itself.
+        let mut inner = self.inner.lock();
+        inner.dev_table_entries()[bdf.raw() as usize].set_table_root(pt.root_paddr());
+        // No invalidation command is needed here: this is called from
+        // `iommu::init()` before `set_enabled(true)`, so translation is
+        // still off and nothing is cached. Limitation: runtime
+        // re-assignment (assign/release in `src/device/mod.rs`) would need
+        // INVALIDATE_DEVTAB_ENTRY commands, which this AMD driver does not
+        // implement yet — only the boot-time fail-closed state is
+        // guaranteed on AMD.
         Ok(())
     }
 

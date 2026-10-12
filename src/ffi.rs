@@ -15,10 +15,21 @@
 use crate::header::HvHeader;
 use crate::percpu::PerCpu;
 
+#[cfg(not(test))]
 extern "C" {
     fn __header_start();
     fn __core_end();
 }
 
+#[cfg(not(test))]
 pub const PER_CPU_ARRAY_PTR: *mut PerCpu = __core_end as _;
+#[cfg(not(test))]
 pub const HEADER_PTR: *const HvHeader = __header_start as _;
+
+// Host test builds have no linker script providing the image layout
+// symbols. Tests never dereference these pointers; they exist so that
+// code retained by the test harness (e.g. drop glue) still links.
+#[cfg(test)]
+pub const PER_CPU_ARRAY_PTR: *mut PerCpu = core::ptr::null_mut();
+#[cfg(test)]
+pub const HEADER_PTR: *const HvHeader = core::ptr::null();

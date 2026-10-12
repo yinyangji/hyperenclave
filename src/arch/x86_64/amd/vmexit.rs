@@ -199,12 +199,21 @@ impl VmExit<'_> {
             },
             SvmExitCode::IOIO => {
                 // EXITINFO1 (SVM Ref. Manual §2): bits 31:16 = port number,
-                // bit 0 = TYPE (1 = IN, 0 = OUT). EXITINFO2 is the RIP that
-                // follows the instruction, so the length is the difference.
+                // bit 0 = TYPE (1 = IN, 0 = OUT), bit 4 = SZ8, bit 5 = SZ16,
+                // bit 6 = SZ32 (exactly one is set). EXITINFO2 is the RIP
+                // that follows the instruction, so the length is the
+                // difference.
                 let port = (exit_info.exit_info_1 >> 16) as u16;
                 let is_read = exit_info.exit_info_1 & 1 != 0;
+                let size = if exit_info.exit_info_1 & (1 << 4) != 0 {
+                    1
+                } else if exit_info.exit_info_1 & (1 << 5) != 0 {
+                    2
+                } else {
+                    4
+                };
                 let instr_len = (exit_info.exit_info_2 - exit_info.guest_rip) as u8;
-                self.handle_pio(port, is_read, instr_len)
+                self.handle_pio(port, is_read, size, instr_len)
             }
             SvmExitCode::SHUTDOWN => {
                 error!("#VMEXIT(SHUTDOWN): {:#x?}", exit_info);

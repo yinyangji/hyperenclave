@@ -99,9 +99,16 @@ impl VmExit<'_> {
             enclave.handle_npt_violation(guest_paddr, ept_vio_info.final_translation)?;
             return Ok(());
         }
+        // A hit inside a protected device's hidden BAR/config page should
+        // never happen — those pages are mapped to the all-ones sinkholes —
+        // so flag it for bring-up debugging as a GPM/sinkhole mismatch.
         warn!(
-            "VM exit: EPT violation @ {:#x} RIP({:#x}, {}): {:#x?}",
-            guest_paddr, exit_info.guest_rip, exit_info.exit_instruction_length, ept_vio_info
+            "VM exit: EPT violation @ {:#x} RIP({:#x}, {}): {:#x?}, hidden-device page: {}",
+            guest_paddr,
+            exit_info.guest_rip,
+            exit_info.exit_instruction_length,
+            ept_vio_info,
+            crate::device::is_protected_mmio(guest_paddr as usize)
         );
         hv_result_err!(ENOSYS)
     }
@@ -177,11 +184,13 @@ impl VmExit<'_> {
             VmxExitReason::CPUID => self.handle_cpuid(),
             VmxExitReason::IO_INSTRUCTION => {
                 // Exit qualification (SDM Vol.3 Table 27-6): bits 31:16 =
-                // port number, bit 3 = direction (1 = IN, 0 = OUT).
+                // port number, bit 3 = direction (1 = IN, 0 = OUT),
+                // bits 2:0 = access size minus one.
                 let qual = VmcsField64ReadOnly::EXIT_QUALIFICATION.read()?;
                 let port = (qual >> 16) as u16;
                 let is_read = qual & (1 << 3) != 0;
-                self.handle_pio(port, is_read, exit_info.exit_instruction_length as u8)
+                let size = (qual & 0b111) as u8 + 1;
+                self.handle_pio(port, is_read, size, exit_info.exit_instruction_length as u8)
             }
             VmxExitReason::VMCALL => self.handle_hypercall(),
             VmxExitReason::MSR_READ => self.handle_msr_read(),

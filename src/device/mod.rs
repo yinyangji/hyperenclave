@@ -49,7 +49,6 @@ use spin::Mutex;
 
 use self::bdf::Bdf;
 use self::domain::{DeviceDomain, DomainOwner, FIRST_PRIVATE_DOMAIN_ID};
-use self::ident::{Classification, DeviceIdent};
 use self::pci::{ConfigAccess, ConfigWriteAccess};
 use self::policy::{DeviceAction, ProtectedDevice};
 use crate::error::HvResult;
@@ -88,7 +87,11 @@ impl DeviceManager {
                 if cfg.read16(f0, pci::offset::VENDOR_ID) == pci::INVALID_VENDOR_ID {
                     continue;
                 }
-                let num_functions = if pci::is_multi_function(cfg, f0) { 8 } else { 1 };
+                let num_functions = if pci::is_multi_function(cfg, f0) {
+                    8
+                } else {
+                    1
+                };
                 for function in 0..num_functions {
                     let bdf = Bdf::new(bus, device, function);
                     let bars = pci::decode_bars_with_size(cfg, bdf);
@@ -263,20 +266,19 @@ impl DeviceManager {
     /// taking it out of the shared default domain.
     pub fn program_iommu(&self, iommus: &[crate::arch::vmm::Iommu]) -> HvResult {
         use crate::iommu::GenericIommu;
-        let domains = self.domains.lock();
-        for domain in domains.iter() {
+        use crate::memory::GenericPageTableImmut;
+        let mut domains = self.domains.lock();
+        for domain in domains.iter_mut() {
+            let (bdf, domain_id) = (domain.bdf, domain.domain_id);
+            let pt = domain.page_table();
             for iommu in iommus {
-                iommu.set_device_page_table(
-                    domain.bdf,
-                    domain.page_table(),
-                    domain.domain_id,
-                )?;
+                iommu.set_device_page_table(bdf, pt, domain_id)?;
             }
             info!(
                 "{} moved to private IOMMU domain {} (root {:#x}), DMA starved until assigned",
-                domain.bdf,
-                domain.domain_id,
-                domain.root_paddr()
+                bdf,
+                domain_id,
+                pt.root_paddr()
             );
         }
         Ok(())

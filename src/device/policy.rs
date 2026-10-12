@@ -123,7 +123,10 @@ mod tests {
         let dev = ProtectedDevice {
             ident: h200(),
             config_page: Some(0xe065_0000),
-            bars: vec![(0x3800_0000_0000, 128 * 1024 * 1024 * 1024), (0xf000_0000, 0x100_0000)],
+            bars: vec![
+                (0x3800_0000_0000, 128 * 1024 * 1024 * 1024),
+                (0xf000_0000, 0x100_0000),
+            ],
             domain_id: 16,
         };
         // Inside the first (above-4GB) aperture.

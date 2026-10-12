@@ -206,11 +206,7 @@ fn bar_size_from_mask(mask_low: u32, mask_high: u32, is_64bit: bool) -> u64 {
 }
 
 /// Read the identity of one function, returning `None` if nothing answers.
-pub fn probe_ident(
-    cfg: &dyn ConfigAccess,
-    bdf: Bdf,
-    largest_bar_size: u64,
-) -> Option<DeviceIdent> {
+pub fn probe_ident(cfg: &dyn ConfigAccess, bdf: Bdf, largest_bar_size: u64) -> Option<DeviceIdent> {
     let vendor_id = cfg.read16(bdf, offset::VENDOR_ID);
     if vendor_id == INVALID_VENDOR_ID || vendor_id == 0 {
         return None;
@@ -390,10 +386,7 @@ mod tests {
     #[test]
     fn test_bar_size_from_mask() {
         // 32-bit BAR, 16MB aperture: mask clears the low 24 bits.
-        assert_eq!(
-            bar_size_from_mask(0xff00_0000, !0, false),
-            16 * 1024 * 1024
-        );
+        assert_eq!(bar_size_from_mask(0xff00_0000, !0, false), 16 * 1024 * 1024);
         // 32-bit BAR, 256MB.
         assert_eq!(
             bar_size_from_mask(0xf000_0000, !0, false),

@@ -56,6 +56,9 @@ pub struct PerCpu {
     pub msr_state: VcpuMsrState,
     /// Per-CPU CPUID emulation policy with the activation snapshot.
     pub cpuid_policy: CpuidPolicy,
+    /// Last CONFIG_ADDRESS value this CPU's guest wrote to port 0xCF8
+    /// (see `arch::pio::handle_config_pio`).
+    pub pci_cfg_addr: u32,
 }
 
 impl PerCpu {
@@ -97,6 +100,7 @@ impl PerCpu {
         self.cpu_id = cpu_id;
         self.state = CpuState::HvDisabled;
         self.linux = LinuxContext::load_from(linux_sp);
+        self.pci_cfg_addr = 0;
 
         let mut hvm = cell.hvm.clone();
         let vaddr = self as *const _ as usize;

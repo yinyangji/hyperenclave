@@ -359,6 +359,9 @@ impl<T> GuestPtr<'_, T> {
         Ok(ptr)
     }
 
+    // The `&GuestPhysAddr` input only ties the output lifetime; the
+    // reference is derived from the physical address itself.
+    #[allow(clippy::mut_from_ref)]
     pub fn gpaddr_to_ref_mut(gpaddr: &'_ GuestPhysAddr, is_secure: bool) -> HvResult<&'_ mut T> {
         Self::check_gpaddr(*gpaddr, is_secure)?;
         let ptr = unsafe { &mut *(phys_to_virt(*gpaddr) as *mut T) };

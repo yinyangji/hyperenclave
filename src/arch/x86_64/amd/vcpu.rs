@@ -591,12 +591,16 @@ mod tests {
         let mut map = [0u8; 3 * 4096];
         apply_io_policy(&mut map);
         let trapped = |port: u16| -> bool { map[port as usize / 8] & (1 << (port % 8)) != 0 };
-        // PM1a_CNT (0x604-0x605) and the APMC block (0xB0-0xB3) trap.
+        // PM1a_CNT (0x604-0x605), the APMC block (0xB0-0xB3) and the PCI
+        // config ports (0xCF8-0xCFF) trap.
         for port in [0x604u16, 0x605, 0xb0, 0xb1, 0xb2, 0xb3] {
             assert!(trapped(port), "port {:#x} must trap", port);
         }
+        for port in 0xcf8..=0xcffu16 {
+            assert!(trapped(port), "port {:#x} must trap", port);
+        }
         // Everything else passes through at bare-metal speed.
-        for port in [0x3f8u16, 0xcf8, 0xcfc, 0x606, 0x603, 0xb4, 0xaf, 0xffff] {
+        for port in [0x3f8u16, 0xd00, 0x606, 0x603, 0xb4, 0xaf, 0xffff] {
             assert!(!trapped(port), "port {:#x} must not trap", port);
         }
         // String-I/O address-size control bits stay clear.

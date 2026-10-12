@@ -31,7 +31,7 @@ use alloc::vec::Vec;
 use super::bdf::Bdf;
 use crate::arch::vmm::IoPageTable;
 use crate::error::HvResult;
-use crate::memory::{GenericPageTableImmut, MemFlags, MemoryRegion, MemorySet, PAGE_SIZE};
+use crate::memory::{MemFlags, MemoryRegion, MemorySet, PAGE_SIZE};
 
 /// Domain id 0 is the shared default domain that every unprotected device
 /// stays in (the `domain_id = 1` the VT-d code already writes is that
@@ -63,8 +63,11 @@ pub struct DeviceDomain {
     pub domain_id: u16,
     pub bdf: Bdf,
     pub owner: DomainOwner,
-    /// This domain's I/O page table. Empty while unassigned.
-    page_table: MemorySet<IoPageTable>,
+    /// This domain's I/O page table. Empty while unassigned. Created on
+    /// first use rather than in `new()`: allocating the root frame up front
+    /// would make host-side unit tests depend on the monitor's frame
+    /// allocator, which does not exist there.
+    page_table: Option<MemorySet<IoPageTable>>,
     /// Guest-physical ranges currently mapped into `page_table`.
     mapped: Vec<(usize, usize)>,
 }
@@ -75,13 +78,18 @@ impl DeviceDomain {
             domain_id,
             bdf,
             owner: DomainOwner::Unassigned,
-            page_table: MemorySet::new(),
+            page_table: None,
             mapped: Vec::new(),
         }
     }
 
-    pub fn page_table(&self) -> &IoPageTable {
-        self.page_table.page_table()
+    /// The domain's page table, allocated on first use.
+    fn ensure_page_table(&mut self) -> &mut MemorySet<IoPageTable> {
+        self.page_table.get_or_insert_with(MemorySet::new)
+    }
+
+    pub fn page_table(&mut self) -> &IoPageTable {
+        self.ensure_page_table().page_table()
     }
 
     pub fn is_assigned(&self) -> bool {
@@ -97,10 +105,14 @@ impl DeviceDomain {
         if size == 0 || start % PAGE_SIZE != 0 || size % PAGE_SIZE != 0 {
             return hv_result_err!(
                 EINVAL,
-                format!("DMA range [{:#x}, {:#x}) is not page aligned", start, start + size)
+                format!(
+                    "DMA range [{:#x}, {:#x}) is not page aligned",
+                    start,
+                    start + size
+                )
             );
         }
-        self.page_table
+        self.ensure_page_table()
             .insert(MemoryRegion::new_with_offset_mapper(
                 start,
                 start,
@@ -113,7 +125,9 @@ impl DeviceDomain {
 
     /// Revoke every grant, returning the domain to its fail-closed state.
     pub fn clear(&mut self) {
-        self.page_table.clear();
+        if let Some(pt) = &mut self.page_table {
+            pt.clear();
+        }
         self.mapped.clear();
     }
 
@@ -123,13 +137,12 @@ impl DeviceDomain {
     }
 
     /// Whether this domain can translate `gpaddr`, i.e. whether the device
-    /// could DMA to it right now.
+    /// could DMA to it right now. `mapped` is the ground truth for grants,
+    /// so this needs no page-table walk (and works in host unit tests).
     pub fn can_access(&self, gpaddr: usize) -> bool {
-        self.page_table().query(gpaddr).is_ok()
-    }
-
-    pub fn root_paddr(&self) -> usize {
-        self.page_table().root_paddr()
+        self.mapped
+            .iter()
+            .any(|&(start, size)| gpaddr.wrapping_sub(start) < size)
     }
 }
 

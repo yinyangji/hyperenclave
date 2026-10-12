@@ -22,9 +22,10 @@
 //! inside the 256-byte window it can address. ECAM is only required for
 //! extended capabilities, which the monitor does not interpret.
 //!
-//! This is the privileged side of the same mechanism the monitor *denies* to
-//! the guest in `pio.rs`: the monitor owns these ports once the guest's
-//! accesses start trapping.
+//! This is the privileged side of the same mechanism whose guest accesses
+//! trap into `pio.rs`: the monitor owns these ports once the guest's
+//! accesses start trapping, and re-performs only the ones targeting
+//! unprotected devices.
 
 use x86_64::instructions::port::Port;
 

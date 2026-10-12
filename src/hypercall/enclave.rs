@@ -347,7 +347,7 @@ impl HyperCall<'_> {
             .rcx
             .as_guest_ptr_ns(&self.gpt, self.privilege_level());
         let ret_len: u64;
-        if read <= 0 {
+        if read == 0 {
             //write ak cert
             let cert_ptr: GuestPtr<Cert> = guest_regs
                 .rdi

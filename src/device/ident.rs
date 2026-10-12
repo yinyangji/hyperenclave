@@ -209,7 +209,12 @@ mod tests {
     #[test]
     fn test_integrated_graphics_is_never_protected() {
         // Intel Core Ultra 7 155H (Meteor Lake-P) integrated graphics.
-        let igpu = ident(vendor::INTEL_EXCLUDED, 0x7d55, class::VGA, 256 * 1024 * 1024);
+        let igpu = ident(
+            vendor::INTEL_EXCLUDED,
+            0x7d55,
+            class::VGA,
+            256 * 1024 * 1024,
+        );
         assert_eq!(igpu.classify(), Classification::VendorNotProtected);
         assert!(!igpu.is_protected());
         // Even with a huge reported aperture it stays out, because the
