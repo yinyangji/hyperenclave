@@ -27,6 +27,9 @@ use crate::error::HvResult;
 ///
 /// Returns `true` if L0 should handle this exit directly (e.g., hypercalls,
 /// L0 policy MSRs/ports), `false` if it should be reflected to L1.
+///
+/// NOTE: For CPUID/MSR/IOIO, returning `false` means "apply L0 policy, then reflect".
+/// The caller must invoke the policy check before reflection.
 pub fn should_l0_handle(exit_code: SvmExitCode) -> bool {
     match exit_code {
         // L0 always handles hypercalls (VMMCALL intercept ensures this).

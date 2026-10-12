@@ -242,6 +242,49 @@ impl VmExit<'_> {
         #[cfg(not(feature = "nested"))]
         let in_l2 = false;
 
+        // If in L2, apply L0 policy before deciding whether to reflect.
+        #[cfg(feature = "nested")]
+        if in_l2 {
+            // For certain exits, apply L0 policy modifications before reflection.
+            match exit_code {
+                SvmExitCode::CPUID => {
+                    // Apply L0's CPUID policy (mask SVM/SME bits, etc.)
+                    self.apply_l2_cpuid_policy(&exit_info)?;
+                }
+                SvmExitCode::MSR => {
+                    // Check L0's MSR policy (block VM_HSAVE_PA, VM_CR writes, etc.)
+                    if let Err(e) = self.check_l2_msr_policy(&exit_info) {
+                        warn!("L2 MSR access blocked by L0 policy: {:?}", e);
+                        // Inject #GP(0) to L2.
+                        self.cpu_data.vcpu.vmcb.inject_event(
+                            libvmm::svm::VmcbIntInfo::from(
+                                libvmm::svm::InterruptType::Exception,
+                                13, // #GP
+                            ),
+                            Some(0),
+                        );
+                        return Ok(());
+                    }
+                }
+                SvmExitCode::IOIO => {
+                    // Check L0's I/O policy.
+                    if let Err(e) = self.check_l2_ioio_policy(&exit_info) {
+                        warn!("L2 I/O access blocked by L0 policy: {:?}", e);
+                        // Inject #GP(0) to L2.
+                        self.cpu_data.vcpu.vmcb.inject_event(
+                            libvmm::svm::VmcbIntInfo::from(
+                                libvmm::svm::InterruptType::Exception,
+                                13,
+                            ),
+                            Some(0),
+                        );
+                        return Ok(());
+                    }
+                }
+                _ => {}
+            }
+        }
+
         // If in L2, check if L0 should handle this exit or reflect to L1.
         #[cfg(feature = "nested")]
         if in_l2 && !super::exit_reflection::should_l0_handle(exit_code) {
@@ -366,3 +409,52 @@ impl VmExit<'_> {
         res
     }
 }
+
+    /// Apply L0's CPUID policy to L2's CPUID result before reflecting to L1.
+    #[cfg(feature = "nested")]
+    fn apply_l2_cpuid_policy(&mut self, _exit_info: &VmExitInfo) -> HvResult {
+        let vcpu = &mut self.cpu_data.vcpu;
+        
+        let leaf = vcpu.regs().rax as u32;
+        let subleaf = vcpu.regs().rcx as u32;
+        
+        // Execute CPUID to get the raw result.
+        let cpuid = unsafe { core::arch::x86_64::__cpuid_count(leaf, subleaf) };
+        let mut eax = cpuid.eax;
+        let mut ebx = cpuid.ebx;
+        let mut ecx = cpuid.ecx;
+        let mut edx = cpuid.edx;
+        
+        // Apply L0's policy (mask SVM/SME bits, etc.)
+        super::l2_policy::apply_cpuid_policy(leaf, subleaf, &mut eax, &mut ebx, &mut ecx, &mut edx)?;
+        
+        // Write the masked result back to VMCB (L1 will see this).
+        vcpu.vmcb.save.rax = eax as u64;
+        vcpu.regs_mut().rbx = ebx as u64;
+        vcpu.regs_mut().rcx = ecx as u64;
+        vcpu.regs_mut().rdx = edx as u64;
+        
+        Ok(())
+    }
+
+    /// Check L0's MSR policy for L2's MSR access before reflecting to L1.
+    #[cfg(feature = "nested")]
+    fn check_l2_msr_policy(&self, exit_info: &VmExitInfo) -> HvResult {
+        let is_write = exit_info.exit_info_1 == 1;
+        let msr = self.cpu_data.vcpu.regs().rcx as u32;
+        
+        super::l2_policy::check_msr_policy(msr, is_write)?;
+        Ok(())
+    }
+
+    /// Check L0's I/O policy for L2's port access before reflecting to L1.
+    #[cfg(feature = "nested")]
+    fn check_l2_ioio_policy(&self, exit_info: &VmExitInfo) -> HvResult {
+        let info = exit_info.exit_info_1;
+        let port = ((info >> 16) & 0xFFFF) as u16;
+        let size = ((info & 0x70) >> 4) as u8;
+        let is_write = (info & 0x1) != 0;
+        
+        super::l2_policy::check_ioio_policy(port, size, is_write)?;
+        Ok(())
+    }

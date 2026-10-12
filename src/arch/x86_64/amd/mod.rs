@@ -21,6 +21,8 @@ pub mod nested;
 mod vmcb_merge;
 #[cfg(feature = "nested")]
 mod exit_reflection;
+#[cfg(feature = "nested")]
+mod l2_policy;
 mod npt;
 mod vcpu;
 mod vmexit;
