@@ -29,4 +29,4 @@ make test                          # 单元测试
 
 勿改：`rust-toolchain`、`x86_64.json`、`linker.lds`、`lib/libtpm.a`、`VERSION`。
 
-更多细节见 `AGENTS.md`（唯一真实源）与 `SKILL.md`（常见任务操作流程）。
+更多细节见 `AGENTS.md`（唯一真实源）与 `SKILL.md`（常见任务操作流程索引，具体步骤在 `.claude/skills/`）。

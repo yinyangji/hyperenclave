@@ -2,6 +2,8 @@
 
 > 本文件是本仓库 AI 辅助开发的**唯一真实源**（Single Source of Truth）。
 > `CLAUDE.md`、`GEMINI.md`、`.cursor/rules/`、`.github/copilot-instructions.md`、`SKILL.md` 均指向本文件。修改项目约定时只改这里。
+>
+> 逐步操作流程（skills）在 `.claude/skills/<name>/SKILL.md`，审查角色（subagents）在 `.claude/agents/`，根目录 `SKILL.md` 是二者的索引。
 
 ## 1. 项目是什么
 
@@ -17,6 +19,11 @@ HyperEnclave 是一个开源、跨平台的可信执行环境（TEE），核心�
 4. **自定义编译目标**：使用 `x86_64.json` 自定义 target 和 `linker.lds` 链接脚本，nightly 工具链 `nightly-2025-11-05`。**不要**修改 `rust-toolchain`、`x86_64.json`、`linker.lds`，除非任务明确要求。
 5. **厂商差异**：Intel（VMX/EPT/VT-d）与 AMD/Hygon（SVM/NPT/AMD-Vi）是两套并行实现，分别位于 `src/arch/x86_64/intel/` 与 `src/arch/x86_64/amd/`。架构无关的逻辑必须放公共层（`src/` 顶层或 `src/arch/x86_64/vmm.rs`），通过 feature 门控 `#[cfg(feature = "intel")]` / `#[cfg(feature = "amd")]` 选择。
 6. **超时/阻塞**：monitor mode 下没有调度器，`spin_loop()` 忙等是唯一的同步等待方式（见 `src/main.rs` 的 `wait_for_other_completed`）。
+
+## 2.1 当前阶段与平台顺序
+
+- 当前主线：算力卡（独立 GPU/NPU/DCU）隔离，设计见 `docs/device-isolation-design.md`，进度与差距见 `docs/hypergpu-gap-analysis.md`。
+- **先 x86，后 ARM**：Intel 与 AMD 两套实现都完成并通过真机验证之后，才开始鲲鹏/ARM（EL2、SMMUv3、GICv3）平移。在此之前不要编写 aarch64 代码，但 `src/device/` 必须保持架构中立。
 
 ## 3. 构建与验证命令
 
@@ -117,7 +124,7 @@ x86_64.json / linker.lds # 自定义编译目标与链接脚本（勿动）
 
 ## 6. 常见任务
 
-逐步操作指南见 `SKILL.md`。速查：
+逐步操作指南见 `.claude/skills/`（索引：根目录 `SKILL.md`）。速查：
 
 - **新增 hypercall**：`HyperCallCode` 加枚举值（编码规则：Supervisor 级 < `0x4000_0000`，User 级 ≥ `0x8000_0000`）→ `validate_state()` 登记 → dispatch match 加分支 → 实现 handler。
 - **新增内存区域类型**：`src/memory/mod.rs` 的 `MemorySet`/`MemoryRegion`，注意 GPM/HVM/DMA 三套页表的一致性。
