@@ -113,11 +113,7 @@ pub fn merge_vmcb12_to_vmcb02(
 fn validate_guest_state(save: &libvmm::svm::vmcb::VmcbStateSaveArea) -> HvResult {
     // Check CR0 reserved bits.
     if save.cr0 & CR0_RESERVED_MASK != 0 {
-        return hv_result_err!(
-            EINVAL,
-            "VMCB12 CR0 {:#x} has reserved bits set",
-            save.cr0
-        );
+        return hv_result_err!(EINVAL, "VMCB12 CR0 {:#x} has reserved bits set", save.cr0);
     }
 
     // CR0.CD and CR0.NW must be consistent (both set or both clear).
@@ -129,20 +125,12 @@ fn validate_guest_state(save: &libvmm::svm::vmcb::VmcbStateSaveArea) -> HvResult
 
     // Check CR4 reserved bits.
     if save.cr4 & CR4_RESERVED_MASK != 0 {
-        return hv_result_err!(
-            EINVAL,
-            "VMCB12 CR4 {:#x} has reserved bits set",
-            save.cr4
-        );
+        return hv_result_err!(EINVAL, "VMCB12 CR4 {:#x} has reserved bits set", save.cr4);
     }
 
     // Check EFER reserved bits.
     if save.efer & EFER_RESERVED_MASK != 0 {
-        return hv_result_err!(
-            EINVAL,
-            "VMCB12 EFER {:#x} has reserved bits set",
-            save.efer
-        );
+        return hv_result_err!(EINVAL, "VMCB12 EFER {:#x} has reserved bits set", save.efer);
     }
 
     // EFER.LME requires CR0.PG and CR4.PAE (long mode consistency).

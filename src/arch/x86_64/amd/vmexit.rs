@@ -187,12 +187,16 @@ impl VmExit<'_> {
         let vmcb12_gpa = self.cpu_data.vcpu.nested.vmcb12_gpa;
 
         // Access VMCB12 to get L1's nCR3.
-        let l1_ncr3 = super::nested::with_vmcb12(vmcb12_gpa, |vmcb12| {
-            Ok(vmcb12.control.nest_cr3)
-        })??;
+        let l1_ncr3 =
+            super::nested::with_vmcb12(vmcb12_gpa, |vmcb12| Ok(vmcb12.control.nest_cr3))??;
 
         // Get or create the nNPT for this L1 nCR3.
-        let nnpt = self.cpu_data.vcpu.nested.nnpt_cache.get_or_create(l1_ncr3)?;
+        let nnpt = self
+            .cpu_data
+            .vcpu
+            .nested
+            .nnpt_cache
+            .get_or_create(l1_ncr3)?;
 
         // Handle the page fault: walk L1 nNPT + L0 GPM, synthesize entry.
         match nnpt.handle_nested_page_fault(l2gpa, l1_ncr3, is_write) {
@@ -410,51 +414,51 @@ impl VmExit<'_> {
     }
 }
 
-    /// Apply L0's CPUID policy to L2's CPUID result before reflecting to L1.
-    #[cfg(feature = "nested")]
-    fn apply_l2_cpuid_policy(&mut self, _exit_info: &VmExitInfo) -> HvResult {
-        let vcpu = &mut self.cpu_data.vcpu;
-        
-        let leaf = vcpu.regs().rax as u32;
-        let subleaf = vcpu.regs().rcx as u32;
-        
-        // Execute CPUID to get the raw result.
-        let cpuid = unsafe { core::arch::x86_64::__cpuid_count(leaf, subleaf) };
-        let mut eax = cpuid.eax;
-        let mut ebx = cpuid.ebx;
-        let mut ecx = cpuid.ecx;
-        let mut edx = cpuid.edx;
-        
-        // Apply L0's policy (mask SVM/SME bits, etc.)
-        super::l2_policy::apply_cpuid_policy(leaf, subleaf, &mut eax, &mut ebx, &mut ecx, &mut edx)?;
-        
-        // Write the masked result back to VMCB (L1 will see this).
-        vcpu.vmcb.save.rax = eax as u64;
-        vcpu.regs_mut().rbx = ebx as u64;
-        vcpu.regs_mut().rcx = ecx as u64;
-        vcpu.regs_mut().rdx = edx as u64;
-        
-        Ok(())
-    }
+/// Apply L0's CPUID policy to L2's CPUID result before reflecting to L1.
+#[cfg(feature = "nested")]
+fn apply_l2_cpuid_policy(&mut self, _exit_info: &VmExitInfo) -> HvResult {
+    let vcpu = &mut self.cpu_data.vcpu;
 
-    /// Check L0's MSR policy for L2's MSR access before reflecting to L1.
-    #[cfg(feature = "nested")]
-    fn check_l2_msr_policy(&self, exit_info: &VmExitInfo) -> HvResult {
-        let is_write = exit_info.exit_info_1 == 1;
-        let msr = self.cpu_data.vcpu.regs().rcx as u32;
-        
-        super::l2_policy::check_msr_policy(msr, is_write)?;
-        Ok(())
-    }
+    let leaf = vcpu.regs().rax as u32;
+    let subleaf = vcpu.regs().rcx as u32;
 
-    /// Check L0's I/O policy for L2's port access before reflecting to L1.
-    #[cfg(feature = "nested")]
-    fn check_l2_ioio_policy(&self, exit_info: &VmExitInfo) -> HvResult {
-        let info = exit_info.exit_info_1;
-        let port = ((info >> 16) & 0xFFFF) as u16;
-        let size = ((info & 0x70) >> 4) as u8;
-        let is_write = (info & 0x1) != 0;
-        
-        super::l2_policy::check_ioio_policy(port, size, is_write)?;
-        Ok(())
-    }
+    // Execute CPUID to get the raw result.
+    let cpuid = unsafe { core::arch::x86_64::__cpuid_count(leaf, subleaf) };
+    let mut eax = cpuid.eax;
+    let mut ebx = cpuid.ebx;
+    let mut ecx = cpuid.ecx;
+    let mut edx = cpuid.edx;
+
+    // Apply L0's policy (mask SVM/SME bits, etc.)
+    super::l2_policy::apply_cpuid_policy(leaf, subleaf, &mut eax, &mut ebx, &mut ecx, &mut edx)?;
+
+    // Write the masked result back to VMCB (L1 will see this).
+    vcpu.vmcb.save.rax = eax as u64;
+    vcpu.regs_mut().rbx = ebx as u64;
+    vcpu.regs_mut().rcx = ecx as u64;
+    vcpu.regs_mut().rdx = edx as u64;
+
+    Ok(())
+}
+
+/// Check L0's MSR policy for L2's MSR access before reflecting to L1.
+#[cfg(feature = "nested")]
+fn check_l2_msr_policy(&self, exit_info: &VmExitInfo) -> HvResult {
+    let is_write = exit_info.exit_info_1 == 1;
+    let msr = self.cpu_data.vcpu.regs().rcx as u32;
+
+    super::l2_policy::check_msr_policy(msr, is_write)?;
+    Ok(())
+}
+
+/// Check L0's I/O policy for L2's port access before reflecting to L1.
+#[cfg(feature = "nested")]
+fn check_l2_ioio_policy(&self, exit_info: &VmExitInfo) -> HvResult {
+    let info = exit_info.exit_info_1;
+    let port = ((info >> 16) & 0xFFFF) as u16;
+    let size = ((info & 0x70) >> 4) as u8;
+    let is_write = (info & 0x1) != 0;
+
+    super::l2_policy::check_ioio_policy(port, size, is_write)?;
+    Ok(())
+}

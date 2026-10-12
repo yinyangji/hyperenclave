@@ -112,21 +112,27 @@ impl NestedPageTable {
     ///
     /// Returns `(l1gpa, l1_permissions)` or `Err(EFAULT)` if L1's nNPT is
     /// missing or invalid (caller should reflect #NPF to L1).
-    fn walk_l1_npt(&self, l2gpa: GuestPhysAddr, l1_ncr3: u64) -> HvResult<(GuestPhysAddr, MemFlags)> {
+    fn walk_l1_npt(
+        &self,
+        l2gpa: GuestPhysAddr,
+        l1_ncr3: u64,
+    ) -> HvResult<(GuestPhysAddr, MemFlags)> {
         use crate::memory::addr::align_down;
         use crate::memory::paging::PageTableLevel;
 
         // L1's nNPT is a guest page table; walk it using guest page table accessor.
         // SAFETY: l1_ncr3 is L1's physical address (in L1's address space), which
         // L0 translates via GPM. The guest page table walker does this automatically.
-        let l1_npt = unsafe {
-            crate::arch::GuestPageTableImmut::from_root(align_down(l1_ncr3 as usize))
-        };
+        let l1_npt =
+            unsafe { crate::arch::GuestPageTableImmut::from_root(align_down(l1_ncr3 as usize)) };
 
         // Walk the L1 nNPT to get L1GPA and permissions.
-        let (l1gpa_usize, l1_flags) = l1_npt
-            .translate(l2gpa.as_usize())
-            .map_err(|e| hv_result_err!(EFAULT, "L1 nNPT walk failed for L2GPA {:#x}: {:?}", l2gpa, e))?;
+        let (l1gpa_usize, l1_flags) = l1_npt.translate(l2gpa.as_usize()).map_err(|e| {
+            hv_err!(
+                EFAULT,
+                format!("L1 nNPT walk failed for L2GPA {:#x}: {:?}", l2gpa, e)
+            )
+        })?;
 
         let l1gpa = GuestPhysAddr::from(l1gpa_usize);
 

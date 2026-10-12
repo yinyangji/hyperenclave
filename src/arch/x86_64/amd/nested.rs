@@ -217,7 +217,9 @@ impl NestedSvmState {
 pub fn gpa_to_hpa(gpa: GuestPhysAddr) -> HvResult<HostPhysAddr> {
     use crate::cell::ROOT_CELL;
 
-    let root_cell = ROOT_CELL.get().ok_or(hv_result_err!(ENODEV, "ROOT_CELL not initialized"))?;
+    let root_cell = ROOT_CELL
+        .get()
+        .ok_or_else(|| hv_err!(ENODEV, "ROOT_CELL not initialized"))?;
     let gpm = root_cell.gpm.lock();
 
     // Walk the GPM to translate GPA → HPA. The GPM is L0's view of what the
@@ -225,7 +227,7 @@ pub fn gpa_to_hpa(gpa: GuestPhysAddr) -> HvResult<HostPhysAddr> {
     // (security memory, EPC), the walk fails and we refuse the access.
     let hpa = gpm
         .translate(gpa)
-        .map_err(|_| hv_result_err!(EFAULT, "VMCB12 GPA {:#x} not mapped in GPM", gpa))?;
+        .map_err(|_| hv_err!(EFAULT, format!("VMCB12 GPA {:#x} not mapped in GPM", gpa)))?;
 
     Ok(hpa)
 }
@@ -241,7 +243,10 @@ where
 {
     // Check 4K alignment (SVM APM Vol.2 §15.5: VMCB must be page-aligned).
     if vmcb12_gpa & (PAGE_SIZE as u64 - 1) != 0 {
-        return hv_result_err!(EINVAL, "VMCB12 GPA {:#x} not 4K-aligned", vmcb12_gpa);
+        return hv_result_err!(
+            EINVAL,
+            format!("VMCB12 GPA {:#x} not 4K-aligned", vmcb12_gpa)
+        );
     }
 
     let hpa = gpa_to_hpa(GuestPhysAddr::from(vmcb12_gpa))?;
@@ -263,7 +268,10 @@ where
     F: FnOnce(&mut Vmcb) -> R,
 {
     if vmcb12_gpa & (PAGE_SIZE as u64 - 1) != 0 {
-        return hv_result_err!(EINVAL, "VMCB12 GPA {:#x} not 4K-aligned", vmcb12_gpa);
+        return hv_result_err!(
+            EINVAL,
+            format!("VMCB12 GPA {:#x} not 4K-aligned", vmcb12_gpa)
+        );
     }
 
     let hpa = gpa_to_hpa(GuestPhysAddr::from(vmcb12_gpa))?;

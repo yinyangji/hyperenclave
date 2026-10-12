@@ -13,18 +13,18 @@
 // limitations under the License.
 
 mod enclave;
+#[cfg(feature = "nested")]
+mod exit_reflection;
 mod iommu;
+#[cfg(feature = "nested")]
+mod l2_policy;
 mod mem_encrypt;
 #[cfg(feature = "nested")]
 pub mod nested;
-#[cfg(feature = "nested")]
-mod vmcb_merge;
-#[cfg(feature = "nested")]
-mod exit_reflection;
-#[cfg(feature = "nested")]
-mod l2_policy;
 mod npt;
 mod vcpu;
+#[cfg(feature = "nested")]
+mod vmcb_merge;
 mod vmexit;
 
 use libvmm::svm::flags::{VmCr, VmCrFlags};
